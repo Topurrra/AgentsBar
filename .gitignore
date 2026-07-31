@@ -1,0 +1,21 @@
+# Dependencies and build outputs
+node_modules/
+dist/
+target/
+src-tauri/gen/
+
+# Local docs, plans, and notes (only README.md ships in the public repo)
+Docs/
+
+# Agent and editor state
+.claude/
+.claude-*
+.vscode/
+.idea/
+.cursor/
+.codex/
+
+# Misc
+*.log
+.DS_Store
+Thumbs.db
