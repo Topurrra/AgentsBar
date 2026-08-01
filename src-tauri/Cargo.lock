@@ -60,7 +60,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentbar"
+name = "agentsbar"
 version = "0.2.0"
 dependencies = [
  "ab_glyph",
@@ -87,6 +87,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "windows",
+ "winreg 0.55.0",
 ]
 
 [[package]]

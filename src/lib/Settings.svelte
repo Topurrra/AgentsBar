@@ -192,7 +192,7 @@
     </div>
     {#if adaptive}
       <p class="note tight">
-        Checks often just after you open AgentBar and backs off to 30 minutes while you
+        Checks often just after you open AgentsBar and backs off to 30 minutes while you
         are away, or on battery saver.
       </p>
     {/if}

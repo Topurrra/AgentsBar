@@ -267,7 +267,7 @@ impl ClaudeCredentials {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.agentbar-tmp");
+        let tmp = path.with_extension("json.agentsbar-tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
         // The staged file holds the tokens, so it must not outlive a failed rename.
         if let Err(e) = std::fs::rename(&tmp, path) {
@@ -466,7 +466,7 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("agentbar-claude-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("agentsbar-claude-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -510,7 +510,7 @@ mod tests {
         assert_eq!(oauth["subscriptionType"], "max");
         assert_eq!(oauth["scopes"][0], "a");
         assert_eq!(oauth["expiresAt"], 1_900_000_000_000i64);
-        assert!(!path.with_extension("json.agentbar-tmp").exists());
+        assert!(!path.with_extension("json.agentsbar-tmp").exists());
     }
 
     /// Row 10. A lost write fails the refresh loudly: Anthropic rotated the refresh
@@ -597,7 +597,7 @@ mod tests {
     }
 
     /// Real-credential smoke test. Run with:
-    /// cargo test -p agentbar claude_live -- --ignored --nocapture
+    /// cargo test -p agentsbar claude_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "needs real ~/.claude/.credentials.json"]
     async fn claude_live_smoke() {

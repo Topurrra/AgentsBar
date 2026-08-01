@@ -347,9 +347,9 @@ mod tests {
         ));
     }
 
-    /// cargo test -p agentbar warp_live -- --ignored --nocapture
+    /// cargo test -p agentsbar warp_live -- --ignored --nocapture
     #[tokio::test]
-    #[ignore = "needs a real Warp API key in the AgentBar config"]
+    #[ignore = "needs a real Warp API key in the AgentsBar config"]
     async fn warp_live() {
         let ctx = FetchContext {
             http: reqwest::Client::new(),

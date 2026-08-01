@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::providers::{all_providers, UsageSnapshot};
 use crate::state::{lead_window, AppState, DisplayWindow};
 
-pub const TRAY_ID: &str = "agentbar-tray";
+pub const TRAY_ID: &str = "agentsbar-tray";
 
 const ICON_SIZE: u32 = 32;
 const BAR_TOP: u32 = 27;
@@ -50,7 +50,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(render_icon(&Glyph::blank()))
-        .tooltip("AgentBar")
+        .tooltip("AgentsBar")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -336,7 +336,7 @@ fn tooltip(snapshots: &[UsageSnapshot]) -> String {
         }
     }
     if lines.is_empty() {
-        "AgentBar".to_string()
+        "AgentsBar".to_string()
     } else {
         lines.join("\n")
     }

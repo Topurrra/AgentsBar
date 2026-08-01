@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(redirect_target(&ok), None);
     }
 
-    /// cargo test -p agentbar amp_live -- --ignored --nocapture
+    /// cargo test -p agentsbar amp_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "needs a real ampcode.com browser session"]
     async fn amp_live() {

@@ -304,7 +304,7 @@ mod tests {
     }
 
     /// Hits the real Copilot endpoint with the token the editor plugin stored.
-    /// cargo test -p agentbar copilot_live -- --ignored --nocapture
+    /// cargo test -p agentsbar copilot_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn copilot_live() {

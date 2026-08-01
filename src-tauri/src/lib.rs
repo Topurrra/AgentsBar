@@ -46,10 +46,14 @@ pub fn run() {
         .setup(|app| {
             // One line per run, so "the log is empty" means the logger is broken rather
             // than being indistinguishable from "nothing happened worth logging".
-            log::info!("AgentBar {} starting", env!("CARGO_PKG_VERSION"));
+            log::info!("AgentsBar {} starting", env!("CARGO_PKG_VERSION"));
             // A killed or aborted run leaves its cookie database copies behind, and a
             // Firefox copy holds cleartext cookie values. Clear them before anything else.
             cookies::sweep_temp_copies();
+            // Renamed from AgentBar: pick up the old directory before reading it, and drop
+            // the old autostart value so a wave 4 upgrader does not get two tray icons.
+            config::migrate_legacy_dir();
+            config::remove_legacy_autostart();
             app.manage(state::AppState::new(config::Config::load()));
             tray::setup(app.handle())?;
             scheduler::start(app.handle().clone());
@@ -76,5 +80,5 @@ pub fn run() {
             commands::clear_cookie_cache,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running AgentBar");
+        .expect("error while running AgentsBar");
 }

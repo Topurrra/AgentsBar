@@ -274,8 +274,8 @@ mod tests {
         assert_eq!(snap.primary.as_ref().unwrap().used_percent, Some(100.0));
     }
 
-    /// Needs an admin key in the AgentBar config.
-    /// cargo test -p agentbar openai_live -- --ignored --nocapture
+    /// Needs an admin key in the AgentsBar config.
+    /// cargo test -p agentsbar openai_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn openai_live() {

@@ -85,7 +85,7 @@ impl Provider for OpenRouter {
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
         let key = api_key(&ctx.config, self)?;
         let auth = Auth::Bearer(&key);
-        let headers = [("X-Title", "AgentBar")];
+        let headers = [("X-Title", "AgentsBar")];
 
         let credits: CreditsEnvelope =
             get_json(&ctx.http, &format!("{BASE}/credits"), &auth, &headers).await?;

@@ -217,7 +217,7 @@ mod tests {
         assert!(snap.plan.is_none() && snap.account.is_none());
     }
 
-    /// cargo test -p agentbar augment_live -- --ignored --nocapture
+    /// cargo test -p agentsbar augment_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "needs a real app.augmentcode.com browser session"]
     async fn augment_live() {

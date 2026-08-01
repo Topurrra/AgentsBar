@@ -29,7 +29,7 @@ impl AppState {
     pub fn new(config: Config) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
-            .user_agent("AgentBar/0.1")
+            .user_agent(concat!("AgentsBar/", env!("CARGO_PKG_VERSION")))
             // These requests carry imported browser cookies and API keys, so a redirect
             // that leaves the original origin is an exfiltration path. Follow only HTTPS
             // redirects that keep the same scheme, host and port; refuse the rest rather

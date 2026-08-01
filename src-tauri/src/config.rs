@@ -1,10 +1,73 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_ENABLED: [&str; 4] = ["codex", "claude", "gemini", "copilot"];
+
+/// `%APPDATA%\AgentsBar`, holding `config.json` and `history.json`.
+pub fn dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("AgentsBar")
+}
+
+/// Files the legacy directory can hold. Nothing else was ever written there.
+const MIGRATED_FILES: [&str; 2] = ["config.json", "history.json"];
+
+/// The product was called AgentBar before the wave 5 rename. Move the old directory to the
+/// new name once, at startup, so an existing user keeps their settings, API keys and history.
+pub fn migrate_legacy_dir() {
+    let Some(base) = dirs::config_dir() else {
+        return;
+    };
+    migrate_dir(&base.join("AgentBar"), &base.join("AgentsBar"));
+}
+
+/// The gate is the payload, not the directory: `history.save()` creates the new directory
+/// within the first refresh cycle, so keying off `new.exists()` would seal a failed
+/// migration permanently. A rename can fail for reasons a same-volume argument does not
+/// cover (a surviving old-name copy holding the directory open, an AV or OneDrive handle),
+/// and the user's DPAPI-wrapped API keys are on the other side of it, so retry next start
+/// and fall back to copying the individual files.
+fn migrate_dir(old: &Path, new: &Path) {
+    if new.join("config.json").exists() || !old.is_dir() {
+        return;
+    }
+    if std::fs::rename(old, new).is_ok() {
+        log::info!("moved settings from {} to {}", old.display(), new.display());
+        return;
+    }
+    // Rename failed. Copy what is there instead, never overwriting anything already in the
+    // new directory, and leave the old one alone so the next start can try again.
+    let _ = std::fs::create_dir_all(new);
+    for name in MIGRATED_FILES {
+        let (from, to) = (old.join(name), new.join(name));
+        if from.is_file() && !to.exists() {
+            match std::fs::copy(&from, &to) {
+                Ok(_) => log::info!("copied {name} from {} to {}", old.display(), new.display()),
+                Err(e) => log::warn!("could not copy {name} from {}: {e}", old.display()),
+            }
+        }
+    }
+}
+
+/// The pre-rename build registered autostart as `AgentBar`. The bundle identifier changed
+/// too, so the single-instance lock does not make the two copies exclude each other: left
+/// behind, this value starts a second tray icon at every logon writing to a second config
+/// directory, and becomes a dead pointer once the old install is deleted.
+pub fn remove_legacy_autostart() {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+    const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    let removed = winreg::RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE)
+        .and_then(|k| k.delete_value("AgentBar"))
+        .is_ok();
+    if removed {
+        log::info!("removed the pre-rename AgentBar autostart entry");
+    }
+}
 
 /// Where a cookie provider gets its `Cookie` header from.
 pub const COOKIE_SOURCES: [&str; 3] = ["auto", "off", "manual"];
@@ -95,10 +158,7 @@ impl Default for Config {
 
 impl Config {
     pub fn path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("AgentBar")
-            .join("config.json")
+        dir().join("config.json")
     }
 
     /// Never fails: a missing file falls back to defaults. A corrupt file is moved
@@ -279,7 +339,7 @@ impl Config {
 ///
 /// **The honest ceiling.** This does NOT stop code running as the same user: anything
 /// running as you can call `CryptUnprotectData` and read these back, exactly the way
-/// AgentBar does. It is not a keystore and there is no master password.
+/// AgentsBar does. It is not a keystore and there is no master password.
 ///
 /// What it does stop is the file leaking as readable text. A `%APPDATA%` folder synced to
 /// OneDrive, a config pasted into a bug report or a GitHub issue, a file level backup or
@@ -396,6 +456,149 @@ unsafe fn take_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rename must carry a wave 4 user's settings, API keys and history across, and
+    /// must never overwrite a directory that is already in use. Runs entirely under
+    /// `%TEMP%`; it never looks at the real `%APPDATA%`.
+    #[test]
+    fn the_legacy_config_directory_moves_once_and_never_clobbers() {
+        let root = std::env::temp_dir().join(format!("agentsbar-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("AgentBar"), root.join("AgentsBar"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("config.json"), r#"{"refresh_minutes":7}"#).unwrap();
+        std::fs::write(old.join("history.json"), "{}").unwrap();
+
+        migrate_dir(&old, &new);
+        assert!(!old.exists(), "the old directory is moved, not copied");
+        assert_eq!(
+            std::fs::read_to_string(new.join("config.json")).unwrap(),
+            r#"{"refresh_minutes":7}"#
+        );
+        assert!(new.join("history.json").is_file(), "history came along");
+
+        // Run it again with both present: the live directory wins, nothing is destroyed.
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("config.json"), "stale").unwrap();
+        migrate_dir(&old, &new);
+        assert_eq!(
+            std::fs::read_to_string(new.join("config.json")).unwrap(),
+            r#"{"refresh_minutes":7}"#
+        );
+        assert!(old.exists(), "a second migration is a no-op, not a delete");
+
+        // A missing old directory is the normal case on a fresh install.
+        std::fs::remove_dir_all(&old).unwrap();
+        migrate_dir(&old, &new);
+        assert!(new.join("config.json").is_file());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The failure the directory-existence gate used to make permanent: the new directory is
+    /// already there (`history.save()` creates it within the first refresh) but the config
+    /// never arrived. The migration has to still run, and it has to survive the rename
+    /// failing, which is why an open handle inside the old directory is held here.
+    #[test]
+    fn a_failed_migration_is_retried_and_falls_back_to_copying() {
+        let root = std::env::temp_dir().join(format!("agentsbar-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("AgentBar"), root.join("AgentsBar"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("config.json"), r#"{"refresh_minutes":9}"#).unwrap();
+        std::fs::write(old.join("history.json"), "{}").unwrap();
+        // The new directory already exists and already holds a history, exactly as it does
+        // one refresh after a failed rename. Only config.json is missing.
+        std::fs::write(new.join("history.json"), r#"{"kept":true}"#).unwrap();
+
+        let held = std::fs::File::open(old.join("config.json")).unwrap();
+        migrate_dir(&old, &new);
+        drop(held);
+
+        assert_eq!(
+            std::fs::read_to_string(new.join("config.json")).unwrap(),
+            r#"{"refresh_minutes":9}"#,
+            "the config arrives whether the rename worked or the copy fallback ran"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new.join("history.json")).unwrap(),
+            r#"{"kept":true}"#,
+            "a file already in the new directory is never overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The test above proves the mechanic with synthetic files. This one proves it against
+    /// a real wave 4 directory: point `AGENTSBAR_MIGRATION_FIXTURE` at a **copy** of an
+    /// `%APPDATA%\AgentBar` and it migrates that copy, then reloads both files through the
+    /// same parsers the app uses, so "the bytes moved" and "the app can still read them"
+    /// are separate assertions. Skipped when the variable is unset, so a normal `cargo test`
+    /// stays hermetic. Nothing from the fixture is ever printed: it holds wrapped API keys.
+    #[test]
+    fn a_real_legacy_directory_survives_the_move_and_still_parses() {
+        let Ok(fixture) = std::env::var("AGENTSBAR_MIGRATION_FIXTURE") else {
+            return;
+        };
+        let fixture = Path::new(&fixture);
+        let root = std::env::temp_dir().join(format!("agentsbar-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("AgentBar"), root.join("AgentsBar"));
+        std::fs::create_dir_all(&old).unwrap();
+
+        // Flat directory: config.json and history.json, nothing nested.
+        let mut before = Vec::new();
+        for entry in std::fs::read_dir(fixture).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let name = path.file_name().unwrap().to_owned();
+                let bytes = std::fs::read(&path).unwrap();
+                std::fs::write(old.join(&name), &bytes).unwrap();
+                before.push((name, bytes));
+            }
+        }
+        assert!(!before.is_empty(), "fixture directory is empty");
+
+        migrate_dir(&old, &new);
+
+        assert!(!old.exists(), "the old directory is moved, not copied");
+        for (name, bytes) in &before {
+            assert_eq!(
+                &std::fs::read(new.join(name)).unwrap(),
+                bytes,
+                "{} changed during the move",
+                name.to_string_lossy()
+            );
+        }
+
+        // Byte-identical is not the same as usable. Parse both files after the move:
+        // Config::parse also unwraps the DPAPI-wrapped secrets, so a broken migration
+        // would show up here rather than at the user's next refresh.
+        for (name, bytes) in &before {
+            let text = String::from_utf8(bytes.clone()).unwrap();
+            let moved = std::fs::read_to_string(new.join(name)).unwrap();
+            match name.to_string_lossy().as_ref() {
+                "config.json" => {
+                    let cfg = Config::parse(&moved);
+                    assert_eq!(cfg.providers.len(), Config::parse(&text).providers.len());
+                    assert!(cfg.refresh_minutes >= 1, "settings survived the move");
+                    assert!(!cfg.providers.is_empty(), "provider settings survived");
+                }
+                "history.json" => {
+                    let series = crate::history::History::parse(&moved);
+                    assert_eq!(
+                        series.series().len(),
+                        crate::history::History::parse(&text).series().len(),
+                        "sparkline history survived the move"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn parsing_never_panics_and_keeps_defaults() {

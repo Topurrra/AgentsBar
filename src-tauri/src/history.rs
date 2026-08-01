@@ -1,7 +1,7 @@
 //! Usage history for the popover sparklines.
 //!
 //! One ring buffer per series, 288 samples (24 hours at the default 5 minute refresh),
-//! persisted to `%APPDATA%\AgentBar\history.json` with the same atomic temp-plus-rename
+//! persisted to `%APPDATA%\AgentsBar\history.json` with the same atomic temp-plus-rename
 //! discipline as config.rs.
 //!
 //! A series is a provider AND an account (row 35, see [`series_key`]), not a provider.
@@ -90,10 +90,7 @@ pub struct History {
 
 impl History {
     pub fn path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("AgentBar")
-            .join("history.json")
+        crate::config::dir().join("history.json")
     }
 
     /// Never fails and never panics: a missing or corrupt file starts an empty history.

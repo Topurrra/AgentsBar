@@ -84,7 +84,7 @@
     </svg>
   </button>
 
-  <button class="iconbtn quit" title="Quit AgentBar" aria-label="Quit AgentBar" onclick={onQuit}>
+  <button class="iconbtn quit" title="Quit AgentsBar" aria-label="Quit AgentsBar" onclick={onQuit}>
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
       <path d="M8 2v6" stroke-linecap="round" />
       <path d="M11.8 4.4a5 5 0 1 1-7.6 0" stroke-linecap="round" />

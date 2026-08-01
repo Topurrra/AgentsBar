@@ -305,7 +305,7 @@ impl CodexAuth {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.agentbar-tmp");
+        let tmp = path.with_extension("json.agentsbar-tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
         // The staged file holds the tokens, so it must not outlive a failed rename.
         if let Err(e) = std::fs::rename(&tmp, path) {
@@ -341,7 +341,7 @@ async fn fetch_usage(http: &reqwest::Client, auth: &CodexAuth) -> Result<Value, 
         .get(usage_url())
         .timeout(REQUEST_TIMEOUT)
         .header("Authorization", format!("Bearer {}", auth.access_token))
-        .header("User-Agent", "AgentBar")
+        .header("User-Agent", "AgentsBar")
         .header("Accept", "application/json");
     if let Some(account) = auth.account_id() {
         req = req.header("ChatGPT-Account-Id", account);
@@ -706,7 +706,7 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("agentbar-codex-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("agentsbar-codex-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(back["tokens"]["access_token"], "new-access");
         assert_eq!(back["tokens"]["refresh_token"], "new-refresh");
         assert!(back["last_refresh"].is_string());
-        assert!(!path.with_extension("json.agentbar-tmp").exists());
+        assert!(!path.with_extension("json.agentsbar-tmp").exists());
     }
 
     /// An unreadable or corrupt file falls back to what we loaded, it does not erase.
@@ -836,7 +836,7 @@ mod tests {
     }
 
     /// Real-credential smoke test. Run with:
-    /// cargo test -p agentbar codex_live -- --ignored --nocapture
+    /// cargo test -p agentsbar codex_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "needs real ~/.codex/auth.json"]
     async fn codex_live_smoke() {

@@ -1,5 +1,5 @@
 //! Shared strategy for providers whose credential is a plain API key or token stored
-//! in the AgentBar config. Modeled on APITokenFetchStrategy.swift: resolve the token,
+//! in the AgentsBar config. Modeled on APITokenFetchStrategy.swift: resolve the token,
 //! perform one JSON call, hand the decoded body to the caller's mapper.
 //!
 //! Not itself in the registry: the per-provider modules build on it.

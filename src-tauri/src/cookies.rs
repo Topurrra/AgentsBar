@@ -53,7 +53,10 @@ const CACHE_TTL: Duration = Duration::from_secs(1800);
 /// providers sharing one broken profile still only scan it once.
 const ERROR_TTL: Duration = Duration::from_secs(30);
 /// File name prefix of the working copies, also what [`sweep_temp_copies`] looks for.
-const TEMP_PREFIX: &str = "agentbar-cookies-";
+const TEMP_PREFIX: &str = "agentsbar-cookies-";
+/// The prefix used before the rename. A copy left behind by an AgentBar build is still a
+/// cleartext Firefox cookie database, so the sweep has to keep collecting it forever.
+const LEGACY_TEMP_PREFIX: &str = "agentbar-cookies-";
 
 // ------------------------------------------------------------------ types
 
@@ -118,7 +121,7 @@ pub fn detect_browsers() -> Vec<BrowserProfile> {
     // into the test output or a CI log. This is the only producer of a `BrowserProfile`,
     // and every read path reaches the disk through one, so the single guard covers them
     // all. The two `#[ignore]`d tests below opt in explicitly.
-    if cfg!(test) && std::env::var("AGENTBAR_ALLOW_TEST_COOKIE_ACCESS").as_deref() != Ok("1") {
+    if cfg!(test) && std::env::var("AGENTSBAR_ALLOW_TEST_COOKIE_ACCESS").as_deref() != Ok("1") {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -444,25 +447,49 @@ fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>, String> {
 ///
 /// The copy is a byte for byte copy of the browser's own file, so a Chromium copy holds
 /// DPAPI protected values but a **Firefox copy holds cleartext cookie values**, because
-/// Firefox stores them that way. Nothing decrypted is ever written back to it. It lives
-/// in the per-user `%TEMP%` (ACL'd to this user) and is deleted in [`Drop`], but Drop does
-/// not run on a panic (release builds abort), so [`sweep_temp_copies`] clears anything a
-/// killed run left behind at the next start.
+/// Firefox stores them that way. Nothing decrypted is ever written back to it. It is
+/// deleted in [`Drop`], but Drop does not run on a panic (release builds abort), so
+/// [`sweep_temp_copies`] clears anything a killed run left behind at the next start.
+///
+/// It lives in [`temp_root`], not `%TEMP%`. `%TEMP%` is only per-user by default: on a
+/// machine where it is redirected (`TEMP=C:\Temp` is common) `icacls` reports
+/// `BUILTIN\Users:(OI)(CI)(F)`, and a cleartext cookie database in a world-writable
+/// directory is not a copy we are allowed to make.
 struct TempCopy {
     path: PathBuf,
 }
 
+/// `%LOCALAPPDATA%\AgentsBar\tmp`, created on demand. `%LOCALAPPDATA%` is inside the user
+/// profile and cannot be redirected to a shared directory by an environment variable.
+fn temp_root() -> PathBuf {
+    let Some(base) = dirs::data_local_dir() else {
+        return std::env::temp_dir();
+    };
+    let dir = base.join("AgentsBar").join("tmp");
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => dir,
+        Err(_) => std::env::temp_dir(),
+    }
+}
+
 /// Delete cookie database copies an earlier run left behind.
 ///
-/// Called once at startup, before any scan. AgentBar is single instance, so nothing else
-/// owns a file with this prefix at that moment.
+/// Called once at startup, before any scan. AgentsBar is single instance, so nothing else
+/// owns a file with this prefix at that moment. `%TEMP%` is swept too, because that is
+/// where builds before this one wrote and their leftovers are still cleartext.
 pub fn sweep_temp_copies() {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+    sweep_dir(&temp_root());
+    sweep_dir(&std::env::temp_dir());
+}
+
+fn sweep_dir(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     let mut removed = 0usize;
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if (name.starts_with(TEMP_PREFIX) || name.starts_with(LEGACY_TEMP_PREFIX))
             && std::fs::remove_file(entry.path()).is_ok()
         {
             removed += 1;
@@ -477,7 +504,7 @@ impl TempCopy {
     fn of(src: &Path) -> Result<Self, CookieError> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("{TEMP_PREFIX}{}-{n}.db", std::process::id()));
+        let path = temp_root().join(format!("{TEMP_PREFIX}{}-{n}.db", std::process::id()));
         // Deliberately not std::fs::copy: that is CopyFileExW, which opens the source
         // denying concurrent writers, so it fails with a sharing violation while the
         // browser is running. A plain File::open shares read, write and delete, which is
@@ -525,7 +552,7 @@ pub fn limitation(profile: &BrowserProfile) -> Option<String> {
         if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
             return Some(format!(
                 "{name} is running and holds its cookie database open exclusively, so \
-                 AgentBar cannot read it. Close {name}, or use another browser, or paste \
+                 AgentsBar cannot read it. Close {name}, or use another browser, or paste \
                  a cookie header in Settings."
             ));
         }
@@ -533,7 +560,7 @@ pub fn limitation(profile: &BrowserProfile) -> Option<String> {
     }
     if profile.app_bound() {
         return Some(format!(
-            "{name} encrypts newer cookies with app-bound encryption (v20). AgentBar does \
+            "{name} encrypts newer cookies with app-bound encryption (v20). AgentsBar does \
              not bypass that security control, so only older cookies can be read. Use \
              Chrome, Edge or Firefox, or paste a cookie header in Settings."
         ));
@@ -946,6 +973,29 @@ mod tests {
         out
     }
 
+    /// A copy left behind by an AgentBar build is still a cleartext Firefox cookie
+    /// database, so the sweep has to keep taking the old prefix as well as the new one.
+    #[test]
+    fn the_sweep_takes_both_the_old_and_the_new_prefix() {
+        let dir = std::env::temp_dir().join(format!("agentsbar-sweeptest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "agentsbar-cookies-100-0.db",
+            "agentbar-cookies-100-0.db",
+            "something-else.db",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        sweep_dir(&dir);
+
+        assert!(!dir.join("agentsbar-cookies-100-0.db").exists());
+        assert!(!dir.join("agentbar-cookies-100-0.db").exists());
+        assert!(dir.join("something-else.db").exists(), "swept too widely");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn v10_and_v11_round_trip() {
         let key = [7u8; 32];
@@ -1109,7 +1159,7 @@ mod tests {
             browser,
             label: label.to_string(),
             // Deliberately absent from disk: any real read must fail loudly.
-            cookies_db: PathBuf::from(format!(r"Z:\agentbar-no-such-profile\{label}\Cookies")),
+            cookies_db: PathBuf::from(format!(r"Z:\agentsbar-no-such-profile\{label}\Cookies")),
             kind: BrowserKind::Firefox,
         }
     }
@@ -1288,7 +1338,7 @@ mod tests {
     /// What one cold popover open costs: `is_configured` for every provider, which is
     /// every cookie provider probing its own domains against every detected browser.
     /// Prints timings only, never a cookie.
-    /// Run with: AGENTBAR_ALLOW_TEST_COOKIE_ACCESS=1 cargo test -- --ignored --nocapture cold_probe
+    /// Run with: AGENTSBAR_ALLOW_TEST_COOKIE_ACCESS=1 cargo test -- --ignored --nocapture cold_probe
     #[test]
     #[ignore = "touches the real browser profiles on this machine"]
     fn cold_probe_of_every_provider_stays_quick() {
@@ -1312,7 +1362,7 @@ mod tests {
 
     /// Proof against this machine's real browsers. Prints browser names, cookie NAMES and
     /// counts only. Never a value, never a length that could leak one.
-    /// Run with: AGENTBAR_ALLOW_TEST_COOKIE_ACCESS=1 cargo test -- --ignored --nocapture
+    /// Run with: AGENTSBAR_ALLOW_TEST_COOKIE_ACCESS=1 cargo test -- --ignored --nocapture
     #[test]
     #[ignore = "touches the real browser profiles on this machine"]
     fn real_browsers_decrypt() {

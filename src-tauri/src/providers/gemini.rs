@@ -525,7 +525,7 @@ mod tests {
     }
 
     /// Hits the real Cloud Code API with the local Gemini CLI login.
-    /// cargo test -p agentbar gemini_live -- --ignored --nocapture
+    /// cargo test -p agentsbar gemini_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn gemini_live() {

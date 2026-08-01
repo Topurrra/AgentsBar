@@ -1,13 +1,13 @@
 [package]
-name = "agentbar"
+name = "agentsbar"
 version = "0.2.0"
 description = "AI coding provider usage limits in the Windows system tray"
-authors = ["AgentBar"]
+authors = ["AgentsBar"]
 edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "agentbar_lib"
+name = "agentsbar_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -48,6 +48,10 @@ windows = { version = "0.61.3", features = [
     # tauri-plugin-dialog and rfd for two message boxes.
     "Win32_UI_WindowsAndMessaging",
 ] }
+# HKCU only: drop the pre-rename autostart value, and read the NSIS uninstall key so the
+# in-app updater can tell an installed copy from a portable one. Already compiled in the
+# tree (embed-resource pulls it), so this costs no additional crate.
+winreg = "0.55"
 
 [dev-dependencies]
 # Already in the tree under reqwest; named here only so a test can build a canned

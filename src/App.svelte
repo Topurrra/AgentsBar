@@ -107,7 +107,7 @@
 <div class="shell">
   <header data-tauri-drag-region>
     <span class="title" data-tauri-drag-region>
-      {view === "settings" ? "Settings" : "AgentBar"}
+      {view === "settings" ? "Settings" : "AgentsBar"}
     </span>
     <span class="gap" data-tauri-drag-region></span>
     {#if view === "settings"}

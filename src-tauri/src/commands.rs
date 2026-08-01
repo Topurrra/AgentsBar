@@ -283,7 +283,7 @@ fn render_report(
 ) -> String {
     let now = Utc::now();
     let mut out: Vec<String> = vec![
-        "AgentBar diagnostics".to_string(),
+        "AgentsBar diagnostics".to_string(),
         "====================".to_string(),
         format!("generated:   {}", now.to_rfc3339()),
         format!("app version: {}", env!("CARGO_PKG_VERSION")),
@@ -571,7 +571,7 @@ mod tests {
 
         let mut failed = UsageSnapshot::new("cursor");
         // The worst realistic case: an upstream error string that echoed the credential
-        // back at us. Nothing in AgentBar builds one, and the sink must catch it anyway.
+        // back at us. Nothing in AgentsBar builds one, and the sink must catch it anyway.
         failed.set_error(&ProviderError::Auth(
             "HTTP 401 for cookie: WorkosCursorSessionToken=FAKECOOKIEVALUE9999".to_string(),
         ));
@@ -627,7 +627,7 @@ mod tests {
         }
         // A report that leaked nothing because it said nothing would pass the loop above.
         for expected in [
-            "AgentBar diagnostics",
+            "AgentsBar diagnostics",
             "codex",
             "cursor",
             "configured=",

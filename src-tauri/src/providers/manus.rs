@@ -196,6 +196,13 @@ mod tests {
         snapshot(&serde_json::from_str(json).unwrap(), Utc::now())
     }
 
+    /// Same, with `now` pinned, so a payload whose reset time is a fixed date does not
+    /// start failing on the day the wall clock passes it.
+    fn parse_at(json: &str, now: &str) -> Result<UsageSnapshot, ProviderError> {
+        let now = DateTime::parse_from_rfc3339(now).unwrap().with_timezone(&Utc);
+        snapshot(&serde_json::from_str(json).unwrap(), now)
+    }
+
     #[test]
     fn session_token_reads_the_named_cookie_or_a_bare_token() {
         assert_eq!(session_token("session_id=abc").as_deref(), Some("abc"));
@@ -213,11 +220,12 @@ mod tests {
 
     #[test]
     fn both_lanes_map_from_a_full_payload() {
-        let snap = parse(
+        let snap = parse_at(
             r#"{"totalCredits":9300,"freeCredits":300,"periodicCredits":1500,
                 "addonCredits":0,"refreshCredits":100,"maxRefreshCredits":300,
                 "proMonthlyCredits":6000,"eventCredits":0,
                 "nextRefreshTime":"2026-08-01T12:00:00Z","refreshInterval":"daily"}"#,
+            "2026-07-31T00:00:00Z",
         )
         .unwrap();
         let primary = snap.primary.unwrap();
@@ -268,7 +276,7 @@ mod tests {
 
     /// Live check against this machine's real Manus session, if one exists.
     /// Prints percentages and counts only, never a cookie value or a token.
-    /// cargo test -p agentbar manus_live -- --ignored --nocapture
+    /// cargo test -p agentsbar manus_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "needs a real manus.im browser session"]
     async fn manus_live() {

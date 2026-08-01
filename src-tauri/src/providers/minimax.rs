@@ -229,7 +229,7 @@ impl Provider for Minimax {
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
         let key = api_key(&ctx.config, self)?;
         let auth = Auth::Bearer(&key);
-        let headers = [("MM-API-Source", "AgentBar")];
+        let headers = [("MM-API-Source", "AgentsBar")];
         let mut last = ProviderError::NotConfigured;
 
         for host in HOSTS {

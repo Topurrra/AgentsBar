@@ -1,8 +1,8 @@
 //! Ported from Sources/CodexBarCore/Providers/XAI/XAIBillingFetcher.swift, prepaid
 //! balance only. The 30-day spend history that Swift also fetches has nowhere to go
-//! in AgentBar's snapshot model, so it is not requested.
+//! in AgentsBar's snapshot model, so it is not requested.
 //!
-//! The Management API needs a team id as well as the key. AgentBar's per-provider
+//! The Management API needs a team id as well as the key. AgentsBar's per-provider
 //! config carries a single string, so the key is written as `MANAGEMENT_KEY:TEAM_ID`
 //! (or the team id comes from `XAI_TEAM_ID`, the same variable the Swift app reads).
 

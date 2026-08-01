@@ -498,7 +498,7 @@ mod tests {
         );
     }
 
-    /// cargo test -p agentbar windsurf_live -- --ignored --nocapture
+    /// cargo test -p agentsbar windsurf_live -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "needs a Windsurf session bundle pasted in Settings"]
     async fn windsurf_live() {

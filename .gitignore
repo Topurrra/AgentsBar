@@ -16,13 +16,13 @@ Docs/
 .codex/
 
 # Release signing material. The updater private key lives OUTSIDE this repo, in
-# %USERPROFILE%\.agentbar-release\, and is passed to the build through the
+# %USERPROFILE%\.agentsbar-release\, and is passed to the build through the
 # TAURI_SIGNING_PRIVATE_KEY environment variable. These patterns are a second line of
 # defence, not the plan: nothing secret should ever be inside the tree to begin with.
 *.key
 *.pem
 *.pfx
-.agentbar-release/
+.agentsbar-release/
 latest.json
 
 # Misc
