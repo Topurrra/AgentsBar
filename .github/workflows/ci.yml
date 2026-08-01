@@ -7,6 +7,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch: # so a run can be kicked off by hand, e.g. to check a cache
 
 jobs:
   build:
