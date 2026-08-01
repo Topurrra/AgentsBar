@@ -23,23 +23,121 @@ const LOAD_CODE_ASSIST: &str = "https://cloudcode-pa.googleapis.com/v1internal:l
 const RETRIEVE_QUOTA: &str = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
 const PROJECTS_ENDPOINT: &str = "https://cloudresourcemanager.googleapis.com/v1/projects";
 
-// ponytail: the Swift probe digs the client id/secret out of the installed CLI's
-// oauth2.js (npm, homebrew, fnm, bundle layouts). These are the same public constants
-// that file ships; env vars still override, so no filesystem archaeology is needed.
-const DEFAULT_CLIENT_ID: &str =
-    "REDACTED_GEMINI_CLI_OAUTH_CLIENT_ID";
-const DEFAULT_CLIENT_SECRET: &str = "REDACTED_GEMINI_CLI_OAUTH_CLIENT_SECRET";
+/// The OAuth client the Gemini CLI uses for its own installed-app flow.
+///
+/// These belong to Google, not to us, so AgentsBar does NOT ship them. We read them out
+/// of the Gemini CLI the user already has installed, which is what CodexBar's Swift probe
+/// does (`GeminiStatusProbe` scrapes the CLI's `oauth2.js`). Hardcoding them would mean
+/// redistributing someone else's credentials, and secret scanners correctly flag that.
+///
+/// Resolution order: the two env vars, then the installed CLI's bundle. Resolved once and
+/// cached, because the scan walks a directory.
+static OAUTH_CLIENT: std::sync::OnceLock<Option<(String, String)>> = std::sync::OnceLock::new();
+
+const CLIENT_ID_RE_SUFFIX: &str = ".apps.googleusercontent.com";
+const CLIENT_SECRET_PREFIX: &str = "GOCSPX-";
 
 fn gemini_dir() -> PathBuf {
     home_subdir(".gemini", None)
 }
 
-fn env_or(var: &str, fallback: &str) -> String {
-    std::env::var(var)
+fn env_var(name: &str) -> Option<String> {
+    std::env::var(name)
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Directories that may hold an installed Gemini CLI. `GEMINI_CLI_PATH` wins so a user
+/// with an unusual layout (volta, fnm, a pnpm store) can point us straight at it.
+fn cli_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(explicit) = env_var("GEMINI_CLI_PATH") {
+        roots.push(PathBuf::from(explicit));
+    }
+    for var in ["APPDATA", "LOCALAPPDATA", "ProgramFiles"] {
+        if let Ok(base) = std::env::var(var) {
+            roots.push(
+                PathBuf::from(base)
+                    .join("npm")
+                    .join("node_modules")
+                    .join("@google")
+                    .join("gemini-cli"),
+            );
+        }
+    }
+    roots
+}
+
+/// Pulls the `<digits>-<id>.apps.googleusercontent.com` / `GOCSPX-...` pair out of one
+/// JavaScript file. Both must come from the same file so we cannot pair a client id with
+/// an unrelated secret.
+fn scrape_pair(text: &str) -> Option<(String, String)> {
+    let id_end = text.find(CLIENT_ID_RE_SUFFIX)?;
+    let id_start = text[..id_end]
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let id = &text[id_start..id_end + CLIENT_ID_RE_SUFFIX.len()];
+    if id.len() <= CLIENT_ID_RE_SUFFIX.len() {
+        return None;
+    }
+
+    let secret_start = text.find(CLIENT_SECRET_PREFIX)?;
+    let secret_end = text[secret_start..]
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .map(|i| secret_start + i)
+        .unwrap_or(text.len());
+    let secret = &text[secret_start..secret_end];
+    if secret.len() <= CLIENT_SECRET_PREFIX.len() {
+        return None;
+    }
+    Some((id.to_string(), secret.to_string()))
+}
+
+fn scrape_installed_cli() -> Option<(String, String)> {
+    for root in cli_roots() {
+        for sub in ["bundle", "dist", "."] {
+            let dir = root.join(sub);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("js") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if let Some(pair) = scrape_pair(&text) {
+                    return Some(pair);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn oauth_client() -> Result<&'static (String, String), ProviderError> {
+    OAUTH_CLIENT
+        .get_or_init(|| {
+            if let (Some(id), Some(secret)) = (
+                env_var("GEMINI_OAUTH_CLIENT_ID"),
+                env_var("GEMINI_OAUTH_CLIENT_SECRET"),
+            ) {
+                return Some((id, secret));
+            }
+            scrape_installed_cli()
+        })
+        .as_ref()
+        .ok_or_else(|| {
+            ProviderError::Auth(
+                "Gemini needs the Gemini CLI installed to refresh its token, or set \
+                 GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET"
+                    .into(),
+            )
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,8 +263,7 @@ async fn refresh_access_token(
     refresh_token: &str,
     dir: &Path,
 ) -> Result<(String, Option<String>), ProviderError> {
-    let client_id = env_or("GEMINI_OAUTH_CLIENT_ID", DEFAULT_CLIENT_ID);
-    let client_secret = env_or("GEMINI_OAUTH_CLIENT_SECRET", DEFAULT_CLIENT_SECRET);
+    let (client_id, client_secret) = oauth_client()?;
     let response = http
         .post(TOKEN_ENDPOINT)
         .form(&[
