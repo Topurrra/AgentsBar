@@ -21,7 +21,7 @@
 #   deleted. Read it top to bottom - that is the whole thing.
 #
 # Usage:
-#   iwr -useb https://volibear.dev/agentsbar | iex
+#   voli install agentsbar
 #   iwr -useb https://github.com/Topurrra/AgentsBar/releases/latest/download/install.ps1 | iex
 #
 # Dev/testing:
