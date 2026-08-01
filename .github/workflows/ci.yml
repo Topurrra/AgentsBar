@@ -19,6 +19,19 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
+      # The crate lives in src-tauri, not the repo root, so point the cache at it
+      # or it finds no Cargo.lock and silently caches nothing. Tauri pulls a large
+      # dependency tree and compiling it from scratch was the whole 19 minutes.
+      # The key is separate from the release job's: this one holds dev profile
+      # artifacts, that one holds the optimized profile, and they do not overlap.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: src-tauri
+          shared-key: ci-dev
+          # Pull requests restore the cache but do not write one, so a branch
+          # cannot evict main's entry with its own half built tree.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       # No setup-node: windows-latest already ships a Node new enough for Vite
       # and for the node --test style suites, so this is one less action to pin.
       - name: Frontend

@@ -20,6 +20,16 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
+      # A separate key from CI's on purpose: this job compiles the optimized
+      # profile with lto and opt-level z, so it shares almost no artifacts with
+      # the dev profile CI caches. Tags are infrequent, but dependencies change
+      # far less often than tags do, so the entry usually survives release to
+      # release. Always saves: there is no branch here to protect main from.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: src-tauri
+          shared-key: release-opt
+
       # Without the signing key the build still produces an installer, then fails
       # at the very end when it cannot write the updater signature. That wastes a
       # full Tauri release build, so refuse up front with a message that says what
