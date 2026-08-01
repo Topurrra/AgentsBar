@@ -546,8 +546,10 @@ async fn store(app: &AppHandle, id: &str, result: Result<UsageSnapshot, Provider
         }
     }
 
+    let notify_on_exhaustion = state.config.read().await.notify_on_exhaustion;
+
     let mut snapshots = state.snapshots.write().await;
-    let previous = snapshots.get(id);
+    let previous = snapshots.get(id).cloned();
     // Row 21. `graced` is true only for the FIRST consecutive forgivable failure: the push
     // both records the decision and answers whether it had already been made.
     let graced = {
@@ -558,15 +560,75 @@ async fn store(app: &AppHandle, id: &str, result: Result<UsageSnapshot, Provider
                 seen.retain(|graced| graced != id);
                 false
             }
-            Err(e) if !already && graceable(e, previous) => {
+            Err(e) if !already && graceable(e, previous.as_ref()) => {
                 seen.push(id.to_string());
                 true
             }
             Err(_) => false,
         }
     };
-    let merged = merge(id, previous, result, graced);
+    let merged = merge(id, previous.as_ref(), result, graced);
+
+    let notify_info = if notify_on_exhaustion
+        && !previous.as_ref().is_some_and(is_lead_exhausted)
+        && is_lead_exhausted(&merged)
+    {
+        let name = provider_by_id(id).map(|p| p.name()).unwrap_or(id);
+        let resets_at = crate::state::lead_window(&merged).and_then(|w| w.resets_at);
+        Some((name, resets_at))
+    } else {
+        None
+    };
+
     snapshots.insert(id.to_string(), merged);
+    drop(snapshots);
+
+    if let Some((name, resets_at)) = notify_info {
+        notify_exhausted(app, name, resets_at);
+    }
+}
+
+/// Whether the binding window of a snapshot is exhausted (0% remaining).
+fn is_lead_exhausted(snapshot: &UsageSnapshot) -> bool {
+    crate::state::lead_window(snapshot).is_some_and(|w| w.used_percent.is_some_and(|u| u >= 100.0))
+}
+
+/// Show a Windows toast notification when a provider hits 0%.
+fn notify_exhausted(app: &AppHandle, name: &str, resets_at: Option<DateTime<Utc>>) {
+    use tauri_plugin_notification::NotificationExt;
+    let body = match resets_at {
+        Some(at) => {
+            let now = Utc::now();
+            let secs = (at - now).num_seconds().max(0);
+            if secs >= 86_400 {
+                format!(
+                    "Usage limit reached. Resets in {}d {}h.",
+                    secs / 86_400,
+                    (secs % 86_400) / 3_600
+                )
+            } else if secs >= 3_600 {
+                format!(
+                    "Usage limit reached. Resets in {}h {}m.",
+                    secs / 3_600,
+                    (secs % 3_600) / 60
+                )
+            } else if secs > 0 {
+                format!("Usage limit reached. Resets in {}m.", secs / 60)
+            } else {
+                "Usage limit reached.".to_string()
+            }
+        }
+        None => "Usage limit reached.".to_string(),
+    };
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title(format!("{name} is exhausted"))
+        .body(&body)
+        .show()
+    {
+        log::warn!("notification failed: {e}");
+    }
 }
 
 /// What a fetch outcome does to the stored snapshot.

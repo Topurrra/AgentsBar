@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
+use super::api_token::TIMEOUT;
 use super::ProviderError;
 
 /// Read and deserialize a JSON credential/config file.
@@ -104,6 +106,90 @@ pub fn redirect_target(response: &reqwest::Response) -> Option<&str> {
                 .ok()
         })
         .flatten()
+}
+
+// ------------------------------------------------------------------ cookie web helpers
+
+/// GET returning the raw body. `headers` carries `Cookie` or `Authorization`; neither the
+/// error nor any log line ever repeats a header value.
+pub async fn web_get(
+    http: &reqwest::Client,
+    url: &str,
+    headers: &[(&str, &str)],
+    signin_hint: &str,
+) -> Result<String, ProviderError> {
+    let mut req = http.get(url).timeout(TIMEOUT);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    web_send(req, signin_hint).await
+}
+
+/// POST with a JSON body, returning the raw body.
+pub async fn web_post(
+    http: &reqwest::Client,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &Value,
+    signin_hint: &str,
+) -> Result<String, ProviderError> {
+    let mut req = http.post(url).json(body).timeout(TIMEOUT);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    web_send(req, signin_hint).await
+}
+
+/// The shared response policy: 401/403 and a bounce to an identity provider are `Auth`,
+/// a bot mitigation 429 is an actionable `Http`, a bare 429 is a `RateLimited`.
+pub async fn web_send(
+    req: reqwest::RequestBuilder,
+    signin_hint: &str,
+) -> Result<String, ProviderError> {
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| ProviderError::Http(e.to_string()))?;
+    let status = resp.status();
+    if status == 401 || status == 403 {
+        return Err(ProviderError::Auth(signin_hint.to_string()));
+    }
+    if let Some(target) = redirect_target(&resp) {
+        return Err(if is_login_url(target) {
+            ProviderError::Auth(signin_hint.to_string())
+        } else {
+            ProviderError::Http(format!(
+                "HTTP {}, redirected off the request origin and not followed",
+                status.as_u16()
+            ))
+        });
+    }
+    if status == 429 {
+        let challenged = ["x-vercel-mitigated", "cf-mitigated"]
+            .iter()
+            .any(|h| resp.headers().contains_key(*h));
+        return Err(if challenged {
+            ProviderError::Http(
+                "blocked by the site's bot mitigation (HTTP 429 challenge). Open the \
+                 provider's site in your browser, pass the check, then refresh"
+                    .to_string(),
+            )
+        } else {
+            ProviderError::RateLimited {
+                retry_after: super::retry_after_of(&resp),
+            }
+        });
+    }
+    if !status.is_success() {
+        return Err(ProviderError::Http(format!("HTTP {}", status.as_u16())));
+    }
+    resp.text()
+        .await
+        .map_err(|e| ProviderError::Http(e.to_string()))
+}
+
+pub fn parse_json<T: DeserializeOwned>(text: &str) -> Result<T, ProviderError> {
+    serde_json::from_str(text).map_err(|e| ProviderError::Parse(e.to_string()))
 }
 
 #[cfg(test)]

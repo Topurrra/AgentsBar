@@ -21,6 +21,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-log = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-notification = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
@@ -44,9 +45,11 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
 windows = { version = "0.61.3", features = [
     "Win32_Security_Cryptography",
-    # MessageBoxW, for the updater's "install this?" prompt. Cheaper than adding
-    # tauri-plugin-dialog and rfd for two message boxes.
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_System_Com_StructuredStorage",
 ] }
 # HKCU only: drop the pre-rename autostart value, and read the NSIS uninstall key so the
 # in-app updater can tell an installed copy from a portable one. Already compiled in the

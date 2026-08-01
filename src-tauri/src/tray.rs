@@ -148,6 +148,62 @@ pub fn apply_autostart(app: &AppHandle, enabled: bool) {
     }
 }
 
+/// The AppUserModelID, matching the `identifier` in tauri.conf.json. Windows uses this to
+/// route toast notifications to the Start Menu shortcut.
+const AUMID: &str = "com.agentsbar.app";
+
+/// PROPERTYKEY for System.AppUserModel.ID.
+const PKEY_APPUSERMODEL_ID: windows::Win32::Foundation::PROPERTYKEY =
+    windows::Win32::Foundation::PROPERTYKEY {
+        fmtid: windows::core::GUID::from_u128(0x9F4C2855_9F50_4457_A92F_9ECA7CD71F07),
+        pid: 5,
+    };
+
+/// Ensure the Start Menu shortcut has the AppUserModelID set so toast notifications can
+/// find it. Self-healing: works for users who installed via install.ps1, NSIS, or by
+/// copying the exe. Silently does nothing if the shortcut or the property store is
+/// unavailable.
+pub fn ensure_shortcut_aumid() {
+    let Some(appdata) = dirs::config_dir() else {
+        return;
+    };
+    let shortcut = appdata.join("Microsoft\\Windows\\Start Menu\\Programs\\AgentsBar.lnk");
+    if !shortcut.is_file() {
+        return;
+    }
+    let path = shortcut.to_string_lossy().to_string();
+
+    unsafe {
+        use windows::Win32::UI::Shell::PropertiesSystem::{
+            IPropertyStore, SHGetPropertyStoreFromParsingName, GETPROPERTYSTOREFLAGS,
+        };
+
+        let store: IPropertyStore = match SHGetPropertyStoreFromParsingName(
+            &windows::core::HSTRING::from(&path),
+            None,
+            GETPROPERTYSTOREFLAGS(2), // GPS_READWRITE
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("could not open shortcut property store: {e}");
+                return;
+            }
+        };
+
+        // Already set correctly?
+        if let Ok(value) = store.GetValue(&PKEY_APPUSERMODEL_ID) {
+            if value.to_string() == AUMID {
+                return;
+            }
+        }
+
+        let prop = windows::Win32::System::Com::StructuredStorage::PROPVARIANT::from(AUMID);
+        if store.SetValue(&PKEY_APPUSERMODEL_ID, &prop).is_ok() && store.Commit().is_ok() {
+            log::info!("set AppUserModelID on Start Menu shortcut");
+        }
+    }
+}
+
 fn note_hide() {
     if let Ok(mut last) = LAST_HIDE.lock() {
         *last = Some(Instant::now());

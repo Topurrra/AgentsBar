@@ -24,7 +24,7 @@ use reqwest::Client;
 use serde_json::{json, Map, Value};
 
 use super::api_token::{loose_f64, parse_rfc3339, TIMEOUT};
-use super::cursor::{web_get, web_send};
+use super::util::{web_get, web_send};
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow, Want};
 use crate::config::Config;
 

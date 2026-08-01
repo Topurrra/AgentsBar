@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::api_token::{epoch_to_utc, parse_rfc3339};
-use super::cursor::web_get;
+use super::util::web_get;
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow};
 use crate::config::Config;
 

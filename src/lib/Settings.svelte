@@ -16,6 +16,8 @@
 
   let browsers = $state([]);
   let query = $state("");
+  let testing = $state(new Set());
+  let testResult = $state({});
 
   const needsKey = (p) => p.auth === "api_key" || p.auth === "token";
 
@@ -89,6 +91,11 @@
   function setStartup(e) {
     const on = e.currentTarget.checked;
     patch((c) => (c.launch_at_startup = on));
+  }
+
+  function setNotify(e) {
+    const on = e.currentTarget.checked;
+    patch((c) => (c.notify_on_exhaustion = on));
   }
 
   function setPinned(e) {
@@ -165,6 +172,23 @@
     field.value = "";
     onKeySaved();
   }
+
+  async function testProvider(id) {
+    testing.update((s) => new Set([...s, id]));
+    testResult[id] = null;
+    await call("refresh_provider", { id });
+    const snapshots = await call("get_snapshots");
+    const snap = snapshots?.find((s) => s.provider_id === id);
+    testResult[id] = snap?.error ? { ok: false } : { ok: true };
+    testing.update((s) => {
+      const next = new Set([...s]);
+      next.delete(id);
+      return next;
+    });
+    setTimeout(() => {
+      testResult[id] = null;
+    }, 4000);
+  }
 </script>
 
 <div class="scroll">
@@ -215,6 +239,22 @@
             type="checkbox"
             checked={!!config?.launch_at_startup}
             onchange={setStartup}
+          />
+          <span></span>
+        </span>
+      </div>
+    </div>
+
+    <div class="field">
+      <div class="row">
+        <label for="notify">Notify when a provider runs out</label>
+        <span class="gap"></span>
+        <span class="switch">
+          <input
+            id="notify"
+            type="checkbox"
+            checked={config?.notify_on_exhaustion ?? true}
+            onchange={setNotify}
           />
           <span></span>
         </span>
@@ -319,6 +359,20 @@
         <span class="gap"></span>
         {#if p.doc_url}
           <button class="btn docs" onclick={() => openUrl(p.doc_url)}>Docs</button>
+        {/if}
+        {#if e.enabled && p.configured}
+          {@const isTesting = testing.has(p.id)}
+          {@const result = testResult[p.id]}
+          <button
+            class="btn docs"
+            class:testing={isTesting}
+            class:ok={result?.ok === true}
+            class:fail={result?.ok === false}
+            disabled={isTesting}
+            onclick={() => testProvider(p.id)}
+          >
+            {isTesting ? "Testing\u2026" : result?.ok === true ? "OK" : result?.ok === false ? "Failed" : "Test"}
+          </button>
         {/if}
         {#if cookie}
           <span class="sel src">
@@ -585,6 +639,20 @@
   .docs {
     --btn-fill: none;
     padding: var(--sp-1) var(--sp-3);
+  }
+
+  .docs.ok {
+    --btn-fg: var(--state-calm-text);
+    --btn-edge: var(--state-calm-bar);
+  }
+
+  .docs.fail {
+    --btn-fg: var(--state-low-text);
+    --btn-edge: var(--state-low-edge);
+  }
+
+  .docs:disabled {
+    opacity: 0.6;
   }
 
   /* --- Provider card ------------------------------------------------------

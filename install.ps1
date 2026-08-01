@@ -47,6 +47,11 @@ $BaseUrl = 'https://github.com/Topurrra/AgentsBar/releases/latest/download'
 $ZipName = 'AgentsBar-x64.zip'
 $ExeName = 'agentsbar.exe'
 
+# AppUserModelID: matches the `identifier` in tauri.conf.json. Windows uses this to
+# associate toast notifications with the Start Menu shortcut. The app sets it on the
+# shortcut at startup (see tray.rs), so the installer only needs to create the shortcut.
+$Aumid = 'com.agentsbar.app'
+
 function Write-Info  { param($m) Write-Host $m -ForegroundColor Cyan }
 function Write-Ok    { param($m) Write-Host $m -ForegroundColor Green }
 function Write-Warn2 { param($m) Write-Host $m -ForegroundColor Yellow }

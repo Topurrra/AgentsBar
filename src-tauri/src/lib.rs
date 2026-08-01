@@ -27,6 +27,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -50,6 +51,9 @@ pub fn run() {
             // A killed or aborted run leaves its cookie database copies behind, and a
             // Firefox copy holds cleartext cookie values. Clear them before anything else.
             cookies::sweep_temp_copies();
+            // Ensure the Start Menu shortcut has the AppUserModelID, so toast notifications
+            // can find it. Self-healing for any install method.
+            tray::ensure_shortcut_aumid();
             // Renamed from AgentBar: pick up the old directory before reading it, and drop
             // the old autostart value so a wave 4 upgrader does not get two tray icons.
             config::migrate_legacy_dir();

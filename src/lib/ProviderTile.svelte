@@ -2,6 +2,7 @@
   import { percentLeft, tone, countdown, credits } from "./format.js";
   import { windowsOf, ago, pace, errorCopy } from "./tiles.js";
   import { providerAccent } from "./icons.js";
+  import { openUrl } from "./api.js";
   import ProviderIcon from "./ProviderIcon.svelte";
   import Sparkline from "./Sparkline.svelte";
 
@@ -79,7 +80,14 @@
        is now the name's tooltip and nothing else. -->
   <div class="head">
     <ProviderIcon id={provider.id} size={16} />
-    <span class="name" title={snapshot?.account ?? undefined}>{provider.name}</span>
+    <button
+      class="name"
+      title={snapshot?.account ?? undefined}
+      onclick={() => openUrl(provider.doc_url)}
+      disabled={!provider.doc_url}
+    >
+      {provider.name}
+    </button>
     {#if snapshot?.plan}
       <!-- Shrinks and ellipses; it must never wrap and push the row to two lines. -->
       <span class="chip badge" title={snapshot.plan}>{snapshot.plan}</span>
@@ -224,6 +232,14 @@
     font-size: var(--type-body);
     font-weight: var(--weight-medium);
     color: var(--text-primary);
+  }
+
+  .name:not(:disabled):hover {
+    color: var(--text-secondary);
+  }
+
+  .name:disabled {
+    cursor: default;
   }
 
   /* Shape comes from the shared .chip. The only thing the badge adds is the right to

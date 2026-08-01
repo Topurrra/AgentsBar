@@ -9,13 +9,10 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use reqwest::Client;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use serde_json::Value;
 
-use super::api_token::{parse_rfc3339, TIMEOUT};
-use super::util::{is_login_url, percent, redirect_target};
+use super::api_token::parse_rfc3339;
+use super::util::{parse_json, percent, web_get};
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow, Want};
 use crate::config::Config;
 
@@ -38,106 +35,6 @@ const SESSION_NAMES: &[&str] = &[
 ];
 
 pub struct Cursor;
-
-// ------------------------------------------------------------------ shared cookie web helpers
-//
-// These live here rather than in `providers/util.rs` only because util.rs is frozen for
-// this wave. They are used by every cookie authenticated provider in this batch, so the
-// integrator should hoist them into util.rs unchanged.
-
-/// GET returning the raw body. `headers` carries `Cookie` or `Authorization`; neither the
-/// error nor any log line ever repeats a header value.
-pub(super) async fn web_get(
-    http: &Client,
-    url: &str,
-    headers: &[(&str, &str)],
-    signin_hint: &str,
-) -> Result<String, ProviderError> {
-    let mut req = http.get(url).timeout(TIMEOUT);
-    for (name, value) in headers {
-        req = req.header(*name, *value);
-    }
-    web_send(req, signin_hint).await
-}
-
-/// POST with a JSON body, returning the raw body.
-pub(super) async fn web_post(
-    http: &Client,
-    url: &str,
-    headers: &[(&str, &str)],
-    body: &Value,
-    signin_hint: &str,
-) -> Result<String, ProviderError> {
-    let mut req = http.post(url).json(body).timeout(TIMEOUT);
-    for (name, value) in headers {
-        req = req.header(*name, *value);
-    }
-    web_send(req, signin_hint).await
-}
-
-/// The shared response policy: 401/403 and a bounce to an identity provider are `Auth`,
-/// a bot mitigation 429 is an actionable `Http`, a bare 429 is a `RateLimited`.
-/// `pub(super)` so a provider that has to build its own request (a form POST, an extra
-/// header) still gets that policy instead of writing a second, divergent copy.
-pub(super) async fn web_send(
-    req: reqwest::RequestBuilder,
-    signin_hint: &str,
-) -> Result<String, ProviderError> {
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| ProviderError::Http(e.to_string()))?;
-    let status = resp.status();
-    if status == 401 || status == 403 {
-        return Err(ProviderError::Auth(signin_hint.to_string()));
-    }
-    if let Some(target) = redirect_target(&resp) {
-        // The client stops a redirect chain that leaves the request origin, so a 3xx is
-        // the response, not a hop. A signed out session gets bounced to an identity
-        // provider, and calling that `Http` would keep stale numbers on screen and never
-        // try the next candidate browser.
-        return Err(if is_login_url(target) {
-            ProviderError::Auth(signin_hint.to_string())
-        } else {
-            ProviderError::Http(format!(
-                "HTTP {}, redirected off the request origin and not followed",
-                status.as_u16()
-            ))
-        });
-    }
-    if status == 429 {
-        // Vercel and Cloudflare answer a bot mitigation challenge with a 429 and a marker
-        // header. That is not a rate limit and waiting does not clear it: the browser has
-        // to pass the check so the clearance cookie lands in the jar we read. So only the
-        // bare 429 becomes a `RateLimited`, which honours the server's `Retry-After` and
-        // reads as self-healing on the tile; the challenge stays an `Http` the user has to
-        // act on, with the instructions in the message.
-        let challenged = ["x-vercel-mitigated", "cf-mitigated"]
-            .iter()
-            .any(|h| resp.headers().contains_key(*h));
-        return Err(if challenged {
-            ProviderError::Http(
-                "blocked by the site's bot mitigation (HTTP 429 challenge). Open the \
-                 provider's site in your browser, pass the check, then refresh"
-                    .to_string(),
-            )
-        } else {
-            ProviderError::RateLimited {
-                retry_after: super::retry_after_of(&resp),
-            }
-        });
-    }
-    if !status.is_success() {
-        return Err(ProviderError::Http(format!("HTTP {}", status.as_u16())));
-    }
-    resp.text()
-        .await
-        .map_err(|e| ProviderError::Http(e.to_string()))
-}
-
-pub(super) fn parse_json<T: DeserializeOwned>(text: &str) -> Result<T, ProviderError> {
-    serde_json::from_str(text).map_err(|e| ProviderError::Parse(e.to_string()))
-}
 
 // ------------------------------------------------------------------ Cursor API models
 

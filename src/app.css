@@ -17,7 +17,7 @@
 :root {
   font-family: system-ui, "Segoe UI Variable", "Segoe UI", sans-serif;
   font-size: 13px;
-  color-scheme: dark;
+  color-scheme: dark light;
 
   /* --- Spacing scale ----------------------------------------------------
      4px base with two half steps for dense chrome. Nothing outside this
@@ -65,6 +65,7 @@
   --surface-sunken: #0c0c0e; /* inputs, wells */
   --surface-track: #212127; /* unfilled part of a progress bar */
   --surface-hatch: #3a3a42; /* stripe colour for an unknown quantity */
+  --surface-toggle: #2a2a30; /* toggle switch track, off state */
 
   /* Neutral overlays for hover and press. Kept as tokens so no component has
      to guess an alpha. */
@@ -76,6 +77,10 @@
   --border-strong: rgba(255, 255, 255, 0.14); /* hover, active field */
   --border-focus: rgba(255, 255, 255, 0.34);
   --sheen: rgba(255, 255, 255, 0.045); /* 1px top highlight on chrome */
+
+  /* --- Scrollbar --------------------------------------------------------- */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.1);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.18);
 
   /* --- Text ---------------------------------------------------------------
      Contrast against --surface-app: primary 15.1:1, secondary 5.3:1,
@@ -146,6 +151,55 @@
   --motion-fast: 0.12s;
   --motion-slow: 0.22s;
   --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --surface-app: #ffffff;
+    --surface-chrome: #f4f4f5;
+    --surface-chrome-top: #eaeaec;
+    --surface-raised: #fafafb;
+    --surface-raised-hover: #f0f0f2;
+    --surface-sunken: #f0f0f2;
+    --surface-track: #e4e4e6;
+    --surface-hatch: #c8c8cc;
+    --surface-toggle: #d0d0d4;
+
+    --overlay-hover: rgba(0, 0, 0, 0.04);
+    --overlay-press: rgba(0, 0, 0, 0.02);
+
+    --border: rgba(0, 0, 0, 0.08);
+    --border-strong: rgba(0, 0, 0, 0.15);
+    --border-focus: rgba(0, 0, 0, 0.4);
+    --sheen: rgba(0, 0, 0, 0.02);
+
+    --scrollbar-thumb: rgba(0, 0, 0, 0.12);
+    --scrollbar-thumb-hover: rgba(0, 0, 0, 0.2);
+
+    --text-primary: #1a1a1c;
+    --text-secondary: #5c5c66;
+    --text-muted: #8a8a94;
+
+    --accent-on: #2da44e;
+    --accent-on-track: #acf4bd;
+
+    --state-calm-bar: #2da44e;
+    --state-calm-text: #1a7f37;
+
+    --state-watch-bar: #9a6700;
+    --state-watch-text: #7d5e00;
+    --state-watch-edge: rgba(154, 103, 0, 0.25);
+
+    --state-low-bar: #cf222e;
+    --state-low-text: #a40e26;
+    --state-low-edge: rgba(207, 34, 46, 0.3);
+
+    --state-spent-bar: #cf222e;
+    --state-spent-text: #a40e26;
+    --state-spent-edge: rgba(207, 34, 46, 0.4);
+  }
 }
 
 * {
@@ -316,14 +370,14 @@ textarea {
 }
 
 .scroll::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--scrollbar-thumb);
   border-radius: var(--radius-pill);
   border: 2px solid transparent;
   background-clip: content-box;
 }
 
 .scroll:hover::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--scrollbar-thumb-hover);
   background-clip: content-box;
 }
 
@@ -352,7 +406,7 @@ textarea {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-pill);
-  background: #2a2a30;
+  background: var(--surface-toggle);
   border: 1px solid var(--border);
   transition: background var(--motion-fast) var(--ease);
   pointer-events: none;

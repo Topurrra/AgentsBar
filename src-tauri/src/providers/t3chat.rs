@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::api_token::epoch_to_utc;
-use super::cursor::web_get;
+use super::util::web_get;
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow, Want};
 use crate::config::Config;
 

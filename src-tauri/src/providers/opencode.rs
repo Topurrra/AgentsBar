@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 
-use super::cursor::web_get;
+use super::util::web_get;
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow, Want};
 use crate::config::Config;
 

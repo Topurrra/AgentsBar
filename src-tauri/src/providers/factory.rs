@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::api_token::{epoch_to_utc, parse_rfc3339};
-use super::cursor::{parse_json, web_get, web_post};
+use super::util::{parse_json, web_get, web_post};
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow, Want};
 use crate::config::Config;
 

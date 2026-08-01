@@ -27,6 +27,7 @@
     "autostart:allow-is-enabled",
     "opener:default",
     "opener:allow-open-url",
+    "notification:default",
     "log:default"
   ]
 }

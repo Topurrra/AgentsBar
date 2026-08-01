@@ -137,6 +137,12 @@ pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
     pub launch_at_startup: bool,
     pub theme: String,
+    #[serde(default = "default_true")]
+    pub notify_on_exhaustion: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -152,6 +158,7 @@ impl Default for Config {
             providers,
             launch_at_startup: false,
             theme: "auto".to_string(),
+            notify_on_exhaustion: true,
         }
     }
 }
