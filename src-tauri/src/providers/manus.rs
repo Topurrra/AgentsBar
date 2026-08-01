@@ -199,7 +199,9 @@ mod tests {
     /// Same, with `now` pinned, so a payload whose reset time is a fixed date does not
     /// start failing on the day the wall clock passes it.
     fn parse_at(json: &str, now: &str) -> Result<UsageSnapshot, ProviderError> {
-        let now = DateTime::parse_from_rfc3339(now).unwrap().with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339(now)
+            .unwrap()
+            .with_timezone(&Utc);
         snapshot(&serde_json::from_str(json).unwrap(), now)
     }
 

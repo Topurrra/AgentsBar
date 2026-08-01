@@ -249,10 +249,7 @@ mod tests {
                 "HTTP 401 (WorkosCursorSessionToken=<redacted> rejected)",
             ),
             // No `=`, no known prefix, no header name: the word alone.
-            (
-                "rejected FAKESESSIONVALUE00001",
-                "rejected <redacted>",
-            ),
+            ("rejected FAKESESSIONVALUE00001", "rejected <redacted>"),
             // A UUID-shaped session id.
             (
                 "session 3f7a1c2e-9b04-4d6a-8f21-77c0de11ab99 expired",

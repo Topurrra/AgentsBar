@@ -1,0 +1,53 @@
+name: CI
+
+# The same filter on both, so a direct push cannot skip a check a pull request
+# would have run. Nothing is path-ignored: the frontend, the Rust crate and the
+# installer script all gate the release, and Docs/ is not in the repo at all.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      # No setup-node: windows-latest already ships a Node new enough for Vite
+      # and for the node --test style suites, so this is one less action to pin.
+      - name: Frontend
+        run: |
+          npm ci
+          npm run build
+
+      # These are plain scripts, not a framework, and they assert the things a
+      # type checker cannot: percent semantics, the tile ordering, and that every
+      # provider in the Rust registry has a logo that is legible on the dark
+      # surface. Cheap, so run them before the slow Rust gates.
+      - name: Frontend tests
+        run: |
+          node src/lib/format.test.js
+          node src/lib/icons.test.js
+          node src/lib/tiles.test.js
+
+      # The frontend build above must come first: tauri.conf.json points
+      # frontendDist at ../dist, and the crate will not configure without it.
+      - name: Format check
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --no-deps --all-targets -- -D warnings
+
+      # Ignored tests are excluded on purpose: they hit real provider APIs with
+      # local credentials that no runner has. They are for a developer's machine.
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test

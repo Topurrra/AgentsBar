@@ -153,7 +153,11 @@ fn percentage_points(ratio: Option<f64>) -> Option<f64> {
 /// countdown by hours for anyone outside it.
 fn json_date(value: Option<&Value>) -> Option<DateTime<Utc>> {
     if let Some(number) = loose_f64(value).filter(|n| *n > 0.0) {
-        let secs = if number >= 1e12 { number / 1000.0 } else { number };
+        let secs = if number >= 1e12 {
+            number / 1000.0
+        } else {
+            number
+        };
         return DateTime::from_timestamp(secs as i64, 0);
     }
     let text = value?.as_str()?.trim();
@@ -218,18 +222,16 @@ fn to_snapshot(
     subscription: Option<&str>,
     quota_config: Option<&str>,
 ) -> Result<UsageSnapshot, ProviderError> {
-    let body = expand(
-        serde_json::from_str(usage).map_err(|e| ProviderError::Parse(e.to_string()))?,
-    );
-    let block = find_object(&body, &["per5HourPercentage", "per1WeekPercentage"]).ok_or_else(
-        || {
+    let body =
+        expand(serde_json::from_str(usage).map_err(|e| ProviderError::Parse(e.to_string()))?);
+    let block =
+        find_object(&body, &["per5HourPercentage", "per1WeekPercentage"]).ok_or_else(|| {
             ProviderError::Parse(
                 "no per5HourPercentage or per1WeekPercentage in the Qwen Cloud token plan usage \
                  response"
                     .to_string(),
             )
-        },
-    )?;
+        })?;
 
     let five_hour = percentage_points(loose_f64(block.get("per5HourPercentage")));
     let weekly = percentage_points(loose_f64(block.get("per1WeekPercentage")));
@@ -267,12 +269,15 @@ fn to_snapshot(
     // tier's own ceiling minus the share a lane says is gone. The weekly ceiling is the
     // plan's real budget; the 5 hour one is a burst cap inside it, which is why it is only
     // the fallback. `credits` reads as "left to spend" everywhere else in the app.
-    snapshot.credits = [(totals.and_then(|t| t.1), weekly), (totals.and_then(|t| t.0), five_hour)]
-        .into_iter()
-        .find_map(|(total, used)| {
-            let total = total.filter(|t| *t > 0.0)?;
-            Some(total * (100.0 - used?) / 100.0)
-        });
+    snapshot.credits = [
+        (totals.and_then(|t| t.1), weekly),
+        (totals.and_then(|t| t.0), five_hour),
+    ]
+    .into_iter()
+    .find_map(|(total, used)| {
+        let total = total.filter(|t| *t > 0.0)?;
+        Some(total * (100.0 - used?) / 100.0)
+    });
     Ok(snapshot)
 }
 
@@ -282,9 +287,14 @@ fn to_snapshot(
 /// shell when the session is dead, so the status code alone cannot tell us.
 fn looks_like_login_page(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
-    ["passport.alibabacloud.com", "signin.aliyun.com", "account.alibabacloud.com/login", "login.qwencloud.com"]
-        .iter()
-        .any(|marker| lower.contains(marker))
+    [
+        "passport.alibabacloud.com",
+        "signin.aliyun.com",
+        "account.alibabacloud.com/login",
+        "login.qwencloud.com",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
         || (lower.contains("login") && lower.contains("password") && lower.contains("sign in"))
 }
 
@@ -309,7 +319,10 @@ fn extract_token(html: &str) -> Option<String> {
 fn quoted_after_assignment(text: &str) -> Option<String> {
     let after_key = text.trim_start();
     let after_key = after_key.strip_prefix(['"', '\'']).unwrap_or(after_key);
-    let body = after_key.trim_start().strip_prefix([':', '='])?.trim_start();
+    let body = after_key
+        .trim_start()
+        .strip_prefix([':', '='])?
+        .trim_start();
     let quote = body.chars().next().filter(|c| *c == '"' || *c == '\'')?;
     let body = &body[quote.len_utf8()..];
     let value = body[..body.find(quote)?].trim();
@@ -320,7 +333,8 @@ fn quoted_after_assignment(text: &str) -> Option<String> {
 fn cookie_value(header: &str, name: &str) -> Option<String> {
     header.split(';').find_map(|pair| {
         let (key, value) = pair.trim().split_once('=')?;
-        (key.trim().eq_ignore_ascii_case(name) && !value.is_empty()).then(|| value.trim().to_string())
+        (key.trim().eq_ignore_ascii_case(name) && !value.is_empty())
+            .then(|| value.trim().to_string())
     })
 }
 
@@ -452,7 +466,9 @@ async fn call_api(
     if let Some(csrf) =
         cookie_value(cookie, "login_aliyunid_csrf").or_else(|| cookie_value(cookie, "csrf"))
     {
-        req = req.header("x-xsrf-token", &csrf).header("x-csrf-token", &csrf);
+        req = req
+            .header("x-xsrf-token", &csrf)
+            .header("x-csrf-token", &csrf);
     }
     web_send(req, SIGNIN_HINT).await
 }
@@ -644,7 +660,10 @@ mod tests {
             at(r#""2033-01-01 00:00:00""#).unwrap().timestamp(),
             1_988_150_400
         );
-        assert_eq!(at(r#""2033-01-01 00:00""#).unwrap().timestamp(), 1_988_150_400);
+        assert_eq!(
+            at(r#""2033-01-01 00:00""#).unwrap().timestamp(),
+            1_988_150_400
+        );
         assert_eq!(at(r#""2033-01-01""#).unwrap().timestamp(), 1_988_150_400);
         assert_eq!(at("0"), None);
         assert_eq!(at(r#""whenever""#), None);
@@ -734,7 +753,10 @@ mod tests {
                     );
                     assert!(lane.used_percent.is_none_or(|p| (0.0..=100.0).contains(&p)));
                 }
-                println!("Qwen Cloud: plan {:?}, credits {:?}", snap.plan, snap.credits);
+                println!(
+                    "Qwen Cloud: plan {:?}, credits {:?}",
+                    snap.plan, snap.credits
+                );
                 assert!(
                     snap.primary.is_some() || snap.secondary.is_some(),
                     "no lane at all"

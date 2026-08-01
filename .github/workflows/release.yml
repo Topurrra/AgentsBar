@@ -1,0 +1,186 @@
+name: Release
+
+# Fires on a version tag: git tag v0.4.0 && git push origin v0.4.0
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # to create the release and upload assets
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      # Without the signing key the build still produces an installer, then fails
+      # at the very end when it cannot write the updater signature. That wastes a
+      # full Tauri release build, so refuse up front with a message that says what
+      # to do rather than a cryptic tauri error ten minutes later.
+      - name: Require the signing key
+        shell: pwsh
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:KEY) {
+            Write-Output "::error::Secret TAURI_SIGNING_PRIVATE_KEY is not set. Without it the release cannot be signed and no installed copy would accept the update. Add it in Settings, Secrets and variables, Actions."
+            exit 1
+          }
+          Write-Output "Signing key present."
+
+      # The version lives in three manifests and the updater compares the running
+      # build against the tag. If they disagree, every user is offered an update
+      # that installs and then offers itself again forever. Fail here instead.
+      - name: Verify version consistency
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $expected = $env:TAG -replace '^v', ''
+          $checks = [ordered]@{
+            'src-tauri/tauri.conf.json' = [regex]::Match((Get-Content src-tauri/tauri.conf.json -Raw), '"version"\s*:\s*"([^"]+)"').Groups[1].Value
+            'src-tauri/Cargo.toml'      = [regex]::Match((Get-Content src-tauri/Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+            'package.json'              = [regex]::Match((Get-Content package.json -Raw), '"version"\s*:\s*"([^"]+)"').Groups[1].Value
+          }
+          $bad = $false
+          foreach ($name in $checks.Keys) {
+            if ($checks[$name] -ne $expected) {
+              Write-Output "::error::$name is '$($checks[$name])' but tag v$expected requires '$expected'"
+              $bad = $true
+            }
+          }
+          if ($bad) {
+            Write-Output "Refusing to release: bump every version reference to $expected, commit, delete the tag and retag."
+            exit 1
+          }
+          Write-Output "All three manifests agree: $expected"
+
+      # A tag can point at a commit CI never saw, so re-run the gates here rather
+      # than trusting that they were green somewhere. Never ship a broken build.
+      - name: Frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Frontend tests
+        run: |
+          node src/lib/format.test.js
+          node src/lib/icons.test.js
+          node src/lib/tiles.test.js
+
+      - name: Format check
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --no-deps --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Build signed
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build
+
+      # Two artifacts from ONE build, so the exe inside the zip is byte identical
+      # to the one the installer writes:
+      #   the NSIS setup exe for people who want a normal Windows install,
+      #   the portable zip for install.ps1 and for voli, whose schema rejects
+      #   standalone executables outright.
+      # The zip keeps a stable, unversioned name so that
+      # releases/latest/download/AgentsBar-x64.zip always resolves, which is what
+      # install.ps1 fetches.
+      - name: Package
+        id: package
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:TAG -replace '^v', ''
+          $rel = "src-tauri/target/release"
+          $setup = "$rel/bundle/nsis/AgentsBar_${version}_x64-setup.exe"
+          if (-not (Test-Path $setup)) {
+            Write-Output "::error::Expected installer not found at $setup"
+            Get-ChildItem "$rel/bundle/nsis" | ForEach-Object { Write-Output "  found: $($_.Name)" }
+            exit 1
+          }
+          if (-not (Test-Path "$setup.sig")) {
+            Write-Output "::error::No .sig beside the installer: the build was not signed and the updater would reject this release."
+            exit 1
+          }
+
+          # agentsbar.exe sits at the archive ROOT, which is why the voli manifest
+          # omits extract_dir and install.ps1 can copy the extraction into place.
+          Compress-Archive -Path "$rel/agentsbar.exe" -DestinationPath "AgentsBar-x64.zip" -Force
+          Copy-Item $setup "AgentsBar_${version}_x64-setup.exe"
+          Copy-Item "$setup.sig" "AgentsBar_${version}_x64-setup.exe.sig"
+
+          # sha256sum format, ASCII: install.ps1 parses the hash out of the first
+          # field, and PowerShell's utf8 would prepend a BOM that corrupts it.
+          foreach ($f in @("AgentsBar-x64.zip", "AgentsBar_${version}_x64-setup.exe")) {
+            $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            "$h  $f" | Out-File "$f.sha256" -Encoding ascii -NoNewline
+            Write-Output "$f  $h"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # The updater fetches this manifest, checks the signature against the public
+      # key pinned in tauri.conf.json, and only then offers the update.
+      - name: Build updater manifest
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:TAG -replace '^v', ''
+          $sig = Get-Content "AgentsBar_${version}_x64-setup.exe.sig" -Raw
+          $manifest = [ordered]@{
+            version   = $version
+            notes     = "See https://github.com/${{ github.repository }}/releases/tag/$env:TAG"
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $sig.Trim()
+                url       = "https://github.com/${{ github.repository }}/releases/download/$env:TAG/AgentsBar_${version}_x64-setup.exe"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Out-File latest.json -Encoding utf8
+          Write-Output "latest.json written for $version"
+
+      - name: Create release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          generate_release_notes: true
+          files: |
+            AgentsBar_${{ steps.package.outputs.version }}_x64-setup.exe
+            AgentsBar_${{ steps.package.outputs.version }}_x64-setup.exe.sha256
+            AgentsBar_${{ steps.package.outputs.version }}_x64-setup.exe.sig
+            AgentsBar-x64.zip
+            AgentsBar-x64.zip.sha256
+            latest.json
+            install.ps1
+
+      # The voli manifest needs the hash of the artifact as published, and it can
+      # only be written after the upload. Print it so the registry PR is a copy
+      # and paste rather than a download and hash by hand.
+      - name: Voli manifest snippet
+        shell: pwsh
+        run: |
+          $v = "${{ steps.package.outputs.version }}"
+          $h = (Get-FileHash "AgentsBar-x64.zip" -Algorithm SHA256).Hash.ToLower()
+          Write-Output "Add manifests/a/agentsbar/$v.toml to Topurrra/voli-registry with:"
+          Write-Output ""
+          Write-Output "[source.x64]"
+          Write-Output "url = `"https://github.com/${{ github.repository }}/releases/download/v$v/AgentsBar-x64.zip`""
+          Write-Output "sha256 = `"$h`""

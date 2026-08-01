@@ -834,7 +834,10 @@ mod tests {
     fn an_all_transient_batch_hands_its_providers_back_to_the_ladder() {
         assert!(network_down(2, 2, 2), "the whole batch, all transiently");
         assert!(network_down(2, 2, 1), "one transient failure is enough");
-        assert!(!network_down(2, 2, 0), "no transient failure is not a network");
+        assert!(
+            !network_down(2, 2, 0),
+            "no transient failure is not a network"
+        );
         assert!(!network_down(2, 1, 1), "one provider still answered");
         assert!(!network_down(0, 0, 0), "nothing was attempted");
 
