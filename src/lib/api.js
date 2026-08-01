@@ -15,3 +15,13 @@ export async function call(cmd, args) {
 export function openUrl(url) {
   if (url) call("plugin:opener|open_url", { url });
 }
+
+// Wave 2 commands. Thin wrappers so component code never repeats a command name.
+export const listBrowsers = () => call("list_browsers");
+export const getHistory = () => call("get_history");
+
+export const setCookieSource = (id, source, browser) =>
+  call("set_cookie_source", { id, source, browser: browser || null });
+
+// header is a secret: pass it straight through, never keep it in component state.
+export const setCookieHeader = (id, header) => call("set_cookie_header", { id, header });

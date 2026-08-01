@@ -5,12 +5,52 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_ENABLED: [&str; 4] = ["codex", "claude", "gemini", "copilot"];
 
+/// Where a cookie provider gets its `Cookie` header from.
+pub const COOKIE_SOURCES: [&str; 3] = ["auto", "off", "manual"];
+/// Browsers the cookie layer can read, in the order `auto` tries them.
+pub const COOKIE_BROWSERS: [&str; 4] = ["chrome", "edge", "brave", "firefox"];
+
+fn default_cookie_source() -> String {
+    "auto".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// "auto" | "off" | "manual". Only meaningful for `AuthKind::Cookie` providers.
+    #[serde(default = "default_cookie_source")]
+    pub cookie_source: String,
+    /// Pin `auto` to one browser. `None` means try every detected browser in order.
+    #[serde(default)]
+    pub cookie_browser: Option<String>,
+    /// A pasted `Cookie` header. As sensitive as `api_key`: redacted on the way out,
+    /// merged back on the way in, never logged.
+    #[serde(default)]
+    pub cookie_header: Option<String>,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: None,
+            cookie_source: default_cookie_source(),
+            cookie_browser: None,
+            cookie_header: None,
+        }
+    }
+}
+
+impl ProviderConfig {
+    fn defaults_for(id: &str) -> Self {
+        Self {
+            enabled: DEFAULT_ENABLED.contains(&id),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,15 +67,7 @@ impl Default for Config {
     fn default() -> Self {
         let providers = crate::providers::all_providers()
             .iter()
-            .map(|p| {
-                (
-                    p.id().to_string(),
-                    ProviderConfig {
-                        enabled: DEFAULT_ENABLED.contains(&p.id()),
-                        api_key: None,
-                    },
-                )
-            })
+            .map(|p| (p.id().to_string(), ProviderConfig::defaults_for(p.id())))
             .collect();
         Self {
             refresh_minutes: 5,
@@ -100,6 +132,21 @@ impl Config {
     /// The upper bound keeps `refresh_minutes * 60` from overflowing a u64 duration.
     pub fn normalize(&mut self) {
         self.refresh_minutes = self.refresh_minutes.clamp(1, 1440);
+        for provider in self.providers.values_mut() {
+            // An unknown source would silently disable a provider, so fall back to auto.
+            if !COOKIE_SOURCES.contains(&provider.cookie_source.as_str()) {
+                provider.cookie_source = default_cookie_source();
+            }
+            provider.cookie_browser = provider
+                .cookie_browser
+                .take()
+                .filter(|b| COOKIE_BROWSERS.contains(&b.as_str()));
+            provider.cookie_header = provider
+                .cookie_header
+                .take()
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty());
+        }
         self.fill_missing_providers();
     }
 
@@ -108,19 +155,24 @@ impl Config {
         let mut copy = self.clone();
         for provider in copy.providers.values_mut() {
             provider.api_key = None;
+            provider.cookie_header = None;
         }
         copy
     }
 
-    /// The webview only ever sees a redacted config, so an absent key in an incoming
-    /// config means "unchanged", never "cleared". Clearing goes through set_api_key.
+    /// The webview only ever sees a redacted config, so an absent secret in an incoming
+    /// config means "unchanged", never "cleared". Clearing goes through set_api_key or
+    /// set_cookie_header.
     pub fn merge_keys_from(&mut self, current: &Self) {
         for (id, provider) in self.providers.iter_mut() {
+            let Some(existing) = current.providers.get(id) else {
+                continue;
+            };
             if provider.api_key.is_none() {
-                provider.api_key = current
-                    .providers
-                    .get(id)
-                    .and_then(|existing| existing.api_key.clone());
+                provider.api_key = existing.api_key.clone();
+            }
+            if provider.cookie_header.is_none() {
+                provider.cookie_header = existing.cookie_header.clone();
             }
         }
     }
@@ -130,10 +182,7 @@ impl Config {
         for p in crate::providers::all_providers() {
             self.providers
                 .entry(p.id().to_string())
-                .or_insert(ProviderConfig {
-                    enabled: DEFAULT_ENABLED.contains(&p.id()),
-                    api_key: None,
-                });
+                .or_insert_with(|| ProviderConfig::defaults_for(p.id()));
         }
     }
 
@@ -150,6 +199,30 @@ impl Config {
 
     pub fn is_enabled(&self, id: &str) -> bool {
         self.providers.get(id).is_some_and(|p| p.enabled)
+    }
+
+    /// Always one of [`COOKIE_SOURCES`]; providers absent from the file default to auto.
+    pub fn cookie_source(&self, id: &str) -> &str {
+        self.providers
+            .get(id)
+            .map(|p| p.cookie_source.as_str())
+            .filter(|s| COOKIE_SOURCES.contains(s))
+            .unwrap_or("auto")
+    }
+
+    pub fn cookie_browser(&self, id: &str) -> Option<&str> {
+        self.providers
+            .get(id)?
+            .cookie_browser
+            .as_deref()
+            .filter(|b| COOKIE_BROWSERS.contains(b))
+    }
+
+    pub fn cookie_header(&self, id: &str) -> Option<&str> {
+        self.providers
+            .get(id)
+            .and_then(|p| p.cookie_header.as_deref())
+            .filter(|h| !h.trim().is_empty())
     }
 
     /// Atomic write: temp file next to the target, then rename over it.
@@ -216,5 +289,44 @@ mod tests {
         outbound.merge_keys_from(&stored);
         assert_eq!(outbound.api_key("openrouter"), Some("secret"));
         assert!(outbound.is_enabled("openrouter"));
+    }
+
+    #[test]
+    fn cookie_headers_are_secrets_like_api_keys() {
+        let mut stored = Config::default();
+        stored.providers.get_mut("cursor").unwrap().cookie_header = Some("a=1; b=2".into());
+
+        let mut outbound = stored.redacted();
+        assert_eq!(outbound.cookie_header("cursor"), None);
+
+        outbound.providers.get_mut("cursor").unwrap().enabled = true;
+        outbound.merge_keys_from(&stored);
+        assert_eq!(outbound.cookie_header("cursor"), Some("a=1; b=2"));
+    }
+
+    #[test]
+    fn cookie_fields_default_and_normalize() {
+        // Absent from an older config file: auto, no pinned browser, no header.
+        let cfg = Config::parse(r#"{"providers":{"cursor":{"enabled":true}}}"#);
+        assert_eq!(cfg.cookie_source("cursor"), "auto");
+        assert_eq!(cfg.cookie_browser("cursor"), None);
+        assert_eq!(cfg.cookie_header("cursor"), None);
+        // A provider missing entirely still answers auto rather than panicking.
+        assert_eq!(cfg.cookie_source("not-a-provider"), "auto");
+
+        // Junk from a hand-edited file falls back instead of disabling the provider.
+        let cfg = Config::parse(
+            r#"{"providers":{"cursor":{"cookie_source":"nonsense","cookie_browser":"netscape","cookie_header":"   "}}}"#,
+        );
+        assert_eq!(cfg.cookie_source("cursor"), "auto");
+        assert_eq!(cfg.cookie_browser("cursor"), None);
+        assert_eq!(cfg.cookie_header("cursor"), None);
+
+        let cfg = Config::parse(
+            r#"{"providers":{"cursor":{"cookie_source":"manual","cookie_browser":"edge","cookie_header":" a=1 "}}}"#,
+        );
+        assert_eq!(cfg.cookie_source("cursor"), "manual");
+        assert_eq!(cfg.cookie_browser("cursor"), Some("edge"));
+        assert_eq!(cfg.cookie_header("cursor"), Some("a=1"));
     }
 }

@@ -1,5 +1,7 @@
 pub mod commands;
 pub mod config;
+pub mod cookies;
+pub mod history;
 pub mod providers;
 pub mod scheduler;
 pub mod state;
@@ -27,6 +29,9 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // A killed or aborted run leaves its cookie database copies behind, and a
+            // Firefox copy holds cleartext cookie values. Clear them before anything else.
+            cookies::sweep_temp_copies();
             app.manage(state::AppState::new(config::Config::load()));
             tray::setup(app.handle())?;
             scheduler::start(app.handle().clone());
@@ -41,6 +46,10 @@ pub fn run() {
             commands::set_config,
             commands::set_api_key,
             commands::quit_app,
+            commands::list_browsers,
+            commands::set_cookie_source,
+            commands::set_cookie_header,
+            commands::get_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AgentBar");

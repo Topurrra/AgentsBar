@@ -5,6 +5,7 @@
   let {
     providers,
     snapshots,
+    history = {},
     now,
     ready,
     refreshing,
@@ -22,7 +23,13 @@
   {#if providers.length}
     <div class="tiles">
       {#each providers as p (p.id)}
-        <ProviderTile provider={p} snapshot={byId.get(p.id)} {now} {onRetry} />
+        <ProviderTile
+          provider={p}
+          snapshot={byId.get(p.id)}
+          samples={history[p.id] ?? []}
+          {now}
+          {onRetry}
+        />
       {/each}
     </div>
   {:else if ready}

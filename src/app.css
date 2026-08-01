@@ -44,7 +44,8 @@ button {
 }
 
 input,
-select {
+select,
+textarea {
   font: inherit;
   color: var(--text);
   background: #0c0c0e;
@@ -56,8 +57,15 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: rgba(255, 255, 255, 0.24);
+}
+
+/* The shell sets user-select: none for the popover chrome; fields must stay editable. */
+input,
+textarea {
+  user-select: text;
 }
 
 /* Icon button used in the header and footer. */

@@ -1,22 +1,29 @@
 <script>
   import { percentLeft, tone, countdown, credits } from "./format.js";
+  import { providerAccent } from "./icons.js";
+  import ProviderIcon from "./ProviderIcon.svelte";
+  import Sparkline from "./Sparkline.svelte";
 
-  let { provider, snapshot, now, onRetry } = $props();
+  let { provider, snapshot, samples = [], now, onRetry } = $props();
 
   const windows = $derived(
     [snapshot?.primary, snapshot?.secondary, snapshot?.tertiary].filter(Boolean),
   );
   const balance = $derived(credits(snapshot?.credits));
+  // 8 digit hex: the brand color at low alpha, no color-mix needed.
+  const accentSoft = $derived(providerAccent(provider.id) + "40");
 </script>
 
-<div class="tile" class:failed={!!snapshot?.error}>
+<div class="tile" class:failed={!!snapshot?.error} style="--accent-soft: {accentSoft}">
   <div class="head">
+    <ProviderIcon id={provider.id} size={15} />
     <span class="name">{provider.name}</span>
     {#if snapshot?.plan}<span class="badge">{snapshot.plan}</span>{/if}
     <span class="gap"></span>
     {#if snapshot?.account}
       <span class="account" title={snapshot.account}>{snapshot.account}</span>
     {/if}
+    <Sparkline {samples} width={52} height={14} />
   </div>
 
   {#if snapshot?.error}
@@ -49,7 +56,14 @@
 
   {#if !snapshot && !windows.length}
     <div class="idle">
-      {provider.configured ? "Waiting for first refresh" : "Not configured"}
+      {#if provider.configured}
+        Waiting for first refresh
+      {:else if provider.auth === "cookie"}
+        No session found. Sign in to {provider.name} in your browser, or paste a session
+        in Settings.
+      {:else}
+        Not configured
+      {/if}
     </div>
   {:else if !windows.length && !snapshot?.error && balance === null}
     <div class="idle">No usage reported</div>
@@ -61,7 +75,9 @@
     border: 1px solid var(--line);
     border-radius: 9px;
     background: var(--panel);
-    padding: 9px 10px 10px;
+    padding: 9px 10px 10px 11px;
+    /* One hairline of the brand color down the left edge. That is the whole accent. */
+    box-shadow: inset 2px 0 0 var(--accent-soft);
   }
 
   .tile.failed {
@@ -72,6 +88,10 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+
+  .head :global(.spark) {
+    margin-left: 2px;
   }
 
   .gap {
@@ -96,7 +116,7 @@
   .account {
     font-size: 11px;
     color: var(--faint);
-    max-width: 160px;
+    max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -213,6 +233,7 @@
   .idle {
     margin-top: 7px;
     font-size: 11.5px;
+    line-height: 1.45;
     color: var(--faint);
   }
 </style>

@@ -1,12 +1,13 @@
 <script>
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { call } from "./lib/api.js";
+  import { call, getHistory } from "./lib/api.js";
   import Usage from "./lib/Usage.svelte";
   import Settings from "./lib/Settings.svelte";
 
   let providers = $state([]);
   let snapshots = $state([]);
+  let history = $state({});
   let config = $state(null);
   let view = $state("usage");
   let now = $state(Date.now());
@@ -25,6 +26,13 @@
   async function loadSnapshots() {
     const s = await call("get_snapshots");
     if (s) snapshots = s;
+  }
+
+  // Sparkline series, one array per provider id. Fetched separately from the
+  // usage-updated payload so the event stays small.
+  async function loadHistory() {
+    const h = await getHistory();
+    if (h) history = h;
   }
 
   async function saveConfig(next) {
@@ -51,12 +59,14 @@
   onMount(() => {
     loadConfig();
     loadSnapshots();
+    loadHistory();
 
     // Countdowns tick locally, no backend traffic.
     const tick = setInterval(() => (now = Date.now()), 30000);
     const subs = [
       listen("usage-updated", (e) => {
         if (Array.isArray(e.payload)) snapshots = e.payload;
+        loadHistory();
       }),
       listen("open-settings", () => (view = "settings")),
     ];
@@ -94,6 +104,7 @@
     <Usage
       providers={enabled}
       {snapshots}
+      {history}
       {now}
       {refreshing}
       ready={config !== null}
