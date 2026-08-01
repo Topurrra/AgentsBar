@@ -75,7 +75,11 @@ pub(super) async fn web_post(
     web_send(req, signin_hint).await
 }
 
-async fn web_send(
+/// The shared response policy: 401/403 and a bounce to an identity provider are `Auth`,
+/// a bot mitigation 429 is an actionable `Http`, a bare 429 is a `RateLimited`.
+/// `pub(super)` so a provider that has to build its own request (a form POST, an extra
+/// header) still gets that policy instead of writing a second, divergent copy.
+pub(super) async fn web_send(
     req: reqwest::RequestBuilder,
     signin_hint: &str,
 ) -> Result<String, ProviderError> {

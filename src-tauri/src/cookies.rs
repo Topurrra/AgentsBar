@@ -1370,7 +1370,7 @@ mod tests {
         // holds no cookie for the provider domains below.
         const EVERYTHING: [&str; 8] = ["com", "org", "net", "ai", "io", "dev", "chat", "im"];
         // The wave 2 provider domains, printed by name so a porter can see what is there.
-        const PROVIDERS: [&str; 10] = [
+        const PROVIDERS: [&str; 11] = [
             "cursor.com",
             "factory.ai",
             "app.devin.ai",
@@ -1381,6 +1381,7 @@ mod tests {
             "windsurf.com",
             "app.augmentcode.com",
             "ampcode.com",
+            "qwencloud.com",
         ];
 
         let profiles = detect_browsers();

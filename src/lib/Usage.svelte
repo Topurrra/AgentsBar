@@ -30,7 +30,9 @@
   const refreshed = $derived(clockTime(oldestFetch(shown)));
 </script>
 
-<div class="scroll">
+<!-- With nothing to list, the scroller becomes a centring box: 400px of void above a
+     message pinned to the top is the one state that looks unfinished rather than empty. -->
+<div class="scroll" class:centred={!providers.length}>
   {#if providers.length}
     <div class="tiles">
       {#each tiles as p (p.id)}
@@ -52,7 +54,7 @@
     <div class="empty">
       <p class="lead">No providers enabled</p>
       <p>Open Settings to enable a provider or paste an API key.</p>
-      <button class="cta" onclick={onSettings}>Open Settings</button>
+      <button class="btn cta" onclick={onSettings}>Open Settings</button>
     </div>
   {/if}
 </div>
@@ -96,54 +98,69 @@
   .tiles {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 10px;
+    gap: var(--sp-4);
+    /* 12px of air on both sides, which is also the header's left inset and Settings'
+       card inset, so switching views does not shift the cards sideways. The right value
+       is one step down because .scroll already reserves a stable 8px scrollbar gutter. */
+    padding: var(--sp-4) var(--sp-2) var(--sp-4) var(--sp-5);
+  }
+
+  .centred {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
   }
 
   .empty {
-    padding: 40px 26px;
+    /* Optically centred: a block of text sits high in its box, so the bottom padding
+       carries the extra rather than the maths. */
+    padding: var(--sp-7) var(--sp-7) calc(var(--sp-7) + var(--sp-6));
     text-align: center;
-    color: var(--faint);
+    color: var(--text-muted);
   }
 
   .empty p {
-    margin: 0 0 6px;
-    line-height: 1.5;
+    margin: 0 0 var(--sp-3);
+    line-height: var(--leading-body);
   }
 
   .lead {
-    color: var(--text);
-    font-weight: 600;
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
   }
 
+  /* The shared .btn at the one size in the app that is a primary action rather than a
+     utility, so it takes body type and a roomier box. */
   .cta {
-    margin-top: 10px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 5px 12px;
-    color: var(--text);
-    transition: background 0.12s ease;
+    margin-top: var(--sp-5);
+    padding: var(--sp-3) var(--sp-5);
+    font-size: var(--type-body);
+    --btn-fg: var(--text-primary);
+    --btn-fill: none;
   }
 
-  .cta:hover {
-    background: rgba(255, 255, 255, 0.07);
-  }
-
+  /* Mirrors the header: the window is undecorated, so the footer has to look like a
+     built edge rather than the page simply ending. Same 38px as the header, so the two
+     chrome bars are the same object at the two ends of the window. */
   footer {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: var(--sp-1);
     flex: none;
-    padding: 6px 8px;
-    border-top: 1px solid var(--line);
-    background: var(--chrome);
+    height: 38px;
+    padding: 0 var(--sp-3);
+    border-top: 1px solid var(--border);
+    background: linear-gradient(
+      180deg,
+      var(--surface-chrome) 0%,
+      var(--surface-app) 100%
+    );
   }
 
   .stamp {
-    padding-left: 4px;
-    font-size: 11px;
-    color: var(--faint);
-    font-variant-numeric: tabular-nums;
+    padding-left: var(--sp-3);
+    font-size: var(--type-meta);
+    color: var(--text-muted);
   }
 
   .gap {
@@ -151,7 +168,7 @@
   }
 
   .quit:hover {
-    color: var(--bad);
+    color: var(--state-low-text);
   }
 
   .spin svg {

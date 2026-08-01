@@ -1,6 +1,6 @@
 # AgentsBar
 
-> Every AI coding limit in your Windows tray. Codex, Claude, Gemini, Copilot, Cursor and 18 more, no logins.
+> Every AI coding limit in your Windows tray. Codex, Claude, Gemini, Copilot, Cursor and 19 more, no logins.
 
 A tiny Windows tray app that shows how much of your AI coding quota is left and when it
 resets. Windows port of [CodexBar](https://github.com/steipete/CodexBar).
@@ -39,7 +39,7 @@ Sign in with the CLI or browser you already use. Most need no configuration.
 |------|-----------|
 | CLI session, automatic | Codex, Claude, Gemini, GitHub Copilot |
 | API key, paste in Settings | OpenAI, z.ai, MiniMax, Kimi, OpenRouter, DeepSeek, ElevenLabs, Deepgram, xAI, Warp |
-| Browser session, automatic | Cursor, Factory, T3 Chat, OpenCode, Manus, Augment, Amp |
+| Browser session, automatic | Cursor, Factory, T3 Chat, OpenCode, Manus, Augment, Amp, Qwen Cloud |
 | Token pasted in Settings | Devin, Windsurf |
 
 ## Privacy

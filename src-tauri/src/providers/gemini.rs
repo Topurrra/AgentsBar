@@ -73,16 +73,6 @@ fn cli_roots() -> Vec<PathBuf> {
 /// JavaScript file. Both must come from the same file so we cannot pair a client id with
 /// an unrelated secret.
 fn scrape_pair(text: &str) -> Option<(String, String)> {
-    let id_end = text.find(CLIENT_ID_RE_SUFFIX)?;
-    let id_start = text[..id_end]
-        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let id = &text[id_start..id_end + CLIENT_ID_RE_SUFFIX.len()];
-    if id.len() <= CLIENT_ID_RE_SUFFIX.len() {
-        return None;
-    }
-
     let secret_start = text.find(CLIENT_SECRET_PREFIX)?;
     let secret_end = text[secret_start..]
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
@@ -92,7 +82,27 @@ fn scrape_pair(text: &str) -> Option<(String, String)> {
     if secret.len() <= CLIENT_SECRET_PREFIX.len() {
         return None;
     }
-    Some((id.to_string(), secret.to_string()))
+
+    // A minified bundle holds client ids for several Google products, so "first id in the
+    // file" pairs the secret with an unrelated client and every refresh 401s. The two
+    // halves of one credential are declared next to each other, so take the id NEAREST the
+    // secret: in the shipped CLI the right one is ~100 bytes away and the decoy is 6.6 MB.
+    let mut best: Option<(usize, &str)> = None;
+    for (id_end, _) in text.match_indices(CLIENT_ID_RE_SUFFIX) {
+        let id_start = text[..id_end]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let id = &text[id_start..id_end + CLIENT_ID_RE_SUFFIX.len()];
+        if id.len() <= CLIENT_ID_RE_SUFFIX.len() {
+            continue;
+        }
+        let distance = id_start.abs_diff(secret_start);
+        if best.map_or(true, |(d, _)| distance < d) {
+            best = Some((distance, id));
+        }
+    }
+    Some((best?.1.to_string(), secret.to_string()))
 }
 
 fn scrape_installed_cli() -> Option<(String, String)> {
@@ -574,6 +584,27 @@ fn check_consumer_tier(body: &str) -> Result<(), ProviderError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the first scrape took the first client id in the file, which in the
+    /// real CLI bundle belongs to another Google product and sits 6.6 MB from the secret.
+    /// Every token refresh then failed with HTTP 401. The right id is the nearest one.
+    #[test]
+    fn the_client_id_paired_with_the_secret_is_the_nearest_one() {
+        let decoy = "111-decoy.apps.googleusercontent.com";
+        let real = "681255809395-real.apps.googleusercontent.com";
+        let text = format!(
+            "var a=\"{decoy}\";{}var id=\"{real}\",secret=\"GOCSPX-realsecret\";",
+            "x".repeat(5000)
+        );
+        let (id, secret) = scrape_pair(&text).expect("pair");
+        assert_eq!(id, real);
+        assert_eq!(secret, "GOCSPX-realsecret");
+    }
+
+    #[test]
+    fn a_file_without_a_secret_yields_nothing() {
+        assert!(scrape_pair("var id=\"1-x.apps.googleusercontent.com\";").is_none());
+    }
 
     #[test]
     fn model_tiers_are_disjoint() {

@@ -106,6 +106,15 @@
 
 <div class="shell">
   <header data-tauri-drag-region>
+    <!-- The whole identity of the app: an ascending meter, the thing every tile
+         below is a variation of. Monochrome on purpose, this is a utility. -->
+    <span class="mark" data-tauri-drag-region aria-hidden="true">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+        <rect x="1.5" y="9" width="3" height="5" rx="1.5" opacity="0.34" />
+        <rect x="6.5" y="5.5" width="3" height="8.5" rx="1.5" opacity="0.62" />
+        <rect x="11.5" y="2" width="3" height="12" rx="1.5" />
+      </svg>
+    </span>
     <span class="title" data-tauri-drag-region>
       {view === "settings" ? "Settings" : "AgentsBar"}
     </span>
@@ -152,22 +161,38 @@
     height: 100%;
   }
 
+  /* The window is undecorated, so this bar is the title bar. It earns that
+     read from a 1px top sheen and a single vertical gradient, not from a blur
+     stack: both are free at paint time and survive a 5 minute tick. */
   header {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--sp-3);
     flex: none;
-    height: 34px;
-    padding: 0 6px 0 12px;
-    border-bottom: 1px solid var(--line);
-    background: var(--chrome);
+    height: 38px;
+    padding: 0 var(--sp-3) 0 var(--sp-5);
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(
+      180deg,
+      var(--surface-chrome-top) 0%,
+      var(--surface-chrome) 100%
+    );
+    box-shadow: inset 0 1px 0 var(--sheen);
+  }
+
+  .mark {
+    display: flex;
+    flex: none;
+    color: var(--text-primary);
+    /* Clicks land on the span, which carries the drag region attribute. */
+    pointer-events: none;
   }
 
   .title {
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.3px;
-    color: var(--dim);
+    font-size: var(--type-body);
+    font-weight: var(--weight-bold);
+    letter-spacing: 0.2px;
+    color: var(--text-primary);
   }
 
   .gap {

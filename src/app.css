@@ -1,25 +1,151 @@
+/* ---------------------------------------------------------------------------
+   AgentsBar design system (wave 6).
+
+   Every colour, size, radius and duration in the app comes from this file.
+   Components must not hardcode a hex value; if a shade is missing, add it here
+   with an intent name rather than inlining it at the call site.
+
+   The load bearing idea is the STATE RAMP near the bottom of :root. A provider
+   with headroom is boring, so `calm` is a neutral grey at regular weight and
+   recedes into the panel. Trouble arrives as saturation plus weight plus a
+   thicker bar. Nothing green ever means "healthy" here; green is reserved for
+   "this switch is on".
+
+   Docs/notes6-tokens.md lists every variable with its intent.
+   --------------------------------------------------------------------------- */
+
 :root {
-  font-family: system-ui, "Segoe UI", "Segoe UI Variable", sans-serif;
+  font-family: system-ui, "Segoe UI Variable", "Segoe UI", sans-serif;
   font-size: 13px;
   color-scheme: dark;
 
-  /* Surfaces. Decision 5: no light theme is built, but every chrome background is a
-     variable now, so adding one later is a @media (prefers-color-scheme: light) block
-     overriding this list rather than a hunt through five components. */
-  --bg: #0f0f11;
-  --panel: #17171a;
-  --chrome: #131316;
-  --field: #0c0c0e;
-  --track: #26262c;
-  /* Stripe colour for an unknown usage bar. */
-  --hatch: #3a3a42;
-  --line: rgba(255, 255, 255, 0.08);
-  --text: #e6e6e8;
-  --dim: #8b8b94;
-  --faint: #63636c;
-  --ok: #3fb950;
-  --warn: #d6a028;
-  --bad: #e5534b;
+  /* --- Spacing scale ----------------------------------------------------
+     4px base with two half steps for dense chrome. Nothing outside this
+     scale: if a gap needs 7px, one of the two neighbours is wrong. */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 24px;
+
+  /* --- Type scale: three sizes, three weights ----------------------------
+     hero = the one number the popover exists to show.
+     body = names, labels, readable values.
+     meta = countdowns, badges, pace, anything you only read on purpose. */
+  --type-hero: 15px;
+  --type-body: 12.5px;
+  --type-meta: 10.5px;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-bold: 600;
+
+  --leading-tight: 1.2;
+  --leading-body: 1.45;
+
+  --tracking-wide: 0.4px; /* uppercase micro labels only */
+
+  /* --- Radii ------------------------------------------------------------- */
+  --radius-sm: 4px; /* badges, chips */
+  --radius-md: 7px; /* buttons, inputs, icon buttons */
+  --radius-lg: 10px; /* tiles, settings cards */
+  --radius-pill: 999px; /* progress bars */
+
+  /* --- Surfaces ----------------------------------------------------------
+     One dark family around #0f0f11. Adding a light theme later is a
+     @media (prefers-color-scheme: light) block overriding this list, not a
+     hunt through five components. */
+  --surface-app: #0f0f11;
+  --surface-chrome: #15151a; /* header and footer bars */
+  --surface-chrome-top: #1b1b21; /* top of the header gradient */
+  --surface-raised: #17171a; /* provider tiles, settings cards */
+  --surface-raised-hover: #1c1c21;
+  --surface-sunken: #0c0c0e; /* inputs, wells */
+  --surface-track: #212127; /* unfilled part of a progress bar */
+  --surface-hatch: #3a3a42; /* stripe colour for an unknown quantity */
+
+  /* Neutral overlays for hover and press. Kept as tokens so no component has
+     to guess an alpha. */
+  --overlay-hover: rgba(255, 255, 255, 0.06);
+  --overlay-press: rgba(255, 255, 255, 0.03);
+
+  /* --- Borders ------------------------------------------------------------ */
+  --border: rgba(255, 255, 255, 0.075); /* default hairline */
+  --border-strong: rgba(255, 255, 255, 0.14); /* hover, active field */
+  --border-focus: rgba(255, 255, 255, 0.34);
+  --sheen: rgba(255, 255, 255, 0.045); /* 1px top highlight on chrome */
+
+  /* --- Text ---------------------------------------------------------------
+     Contrast against --surface-app: primary 15.1:1, secondary 5.3:1,
+     muted 3.7:1. Muted is the floor and is only for meta the user may skip. */
+  --text-primary: #e8e8ea;
+  --text-secondary: #8f8f99;
+  --text-muted: #6e6e78;
+
+  /* --- Accent: "on", not "healthy" ----------------------------------------
+     Toggle switches and other affordances that are literally enabled. Never
+     used to say a quota is fine; that is the ramp's job. */
+  --accent-on: #3fb950;
+  --accent-on-track: #23532c;
+
+  /* --- STATE RAMP ---------------------------------------------------------
+     Five steps, mapped from format.js `tone()` plus one extra:
+
+       tone "ok"      (>50% left)  -> calm     silent, neutral, thin
+       tone "warn"    (20-50%)     -> watch    amber, medium weight
+       tone "bad"     (<20%)       -> low      red, bold
+       0% left                     -> spent    red, bold, filled edge
+       tone "unknown" (no number)  -> unknown  hatched, muted
+
+     Each step ships four values so a component can express the whole
+     escalation from variables alone:
+       -bar     fill colour of the progress bar
+       -text    colour of the percentage and its label
+       -edge    tint for a tile border or rule; transparent while calm
+       -weight  font weight of the number, so trouble gains mass */
+  /* Healthy is green. The wave 6 redesign made it grey so full lanes would recede,
+     and the owner rejected that: a usage bar reads as green, amber, red, and losing
+     the green end left the scale looking broken rather than calm. The receding is
+     now carried by geometry and weight alone, which is what the hero lane sizing and
+     -weight below are for. */
+  --state-calm-bar: #3fb950;
+  --state-calm-text: #56d364;
+  --state-calm-edge: transparent;
+  --state-calm-weight: var(--weight-regular);
+
+  --state-watch-bar: #b98c2c;
+  --state-watch-text: #d6a028;
+  --state-watch-edge: rgba(214, 160, 40, 0.3);
+  --state-watch-weight: var(--weight-medium);
+
+  --state-low-bar: #d94f47;
+  --state-low-text: #e5534b;
+  --state-low-edge: rgba(229, 83, 75, 0.34);
+  --state-low-weight: var(--weight-bold);
+
+  --state-spent-bar: #e5534b;
+  --state-spent-text: #f0685e;
+  --state-spent-edge: rgba(229, 83, 75, 0.5);
+  --state-spent-weight: var(--weight-bold);
+
+  --state-unknown-bar: var(--surface-hatch);
+  --state-unknown-text: var(--text-muted);
+  --state-unknown-edge: transparent;
+  --state-unknown-weight: var(--weight-regular);
+
+  /* Bar geometry. The binding window uses -hero, every other lane uses -sub,
+     which is how the eye learns which one constrains you without reading. */
+  --bar-h-hero: 6px;
+  --bar-h-sub: 3px;
+
+  /* --- Motion -------------------------------------------------------------
+     A whisper. Transform and opacity only; anything longer than -slow is a
+     bug. All of it is switched off under prefers-reduced-motion below. */
+  --motion-fast: 0.12s;
+  --motion-slow: 0.22s;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
 * {
@@ -31,11 +157,17 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font-size: var(--type-body);
+  line-height: var(--leading-body);
   overflow: hidden;
   user-select: none;
   -webkit-font-smoothing: antialiased;
+  /* Every digit in this app ticks: countdowns, percentages, timestamps.
+     Tabular figures app-wide means none of them reflow as they change, and
+     no component has to remember to ask. */
+  font-variant-numeric: tabular-nums;
 }
 
 #app {
@@ -49,48 +181,124 @@ button {
   border: 0;
   padding: 0;
   cursor: pointer;
+  font-variant-numeric: inherit;
+}
+
+/* One focus treatment for the whole app. Keyboard only, never on mouse. */
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
 }
 
 input,
 select,
 textarea {
   font: inherit;
-  color: var(--text);
-  background: var(--field);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 4px 7px;
+  font-variant-numeric: inherit;
+  color: var(--text-primary);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
   outline: none;
-  transition: border-color 0.12s ease;
+  transition: border-color var(--motion-fast) var(--ease);
+}
+
+input:hover,
+select:hover,
+textarea:hover {
+  border-color: var(--border-strong);
 }
 
 input:focus,
 select:focus,
 textarea:focus {
-  border-color: rgba(255, 255, 255, 0.24);
+  border-color: var(--border-focus);
 }
 
-/* The shell sets user-select: none for the popover chrome; fields must stay editable. */
+/* The shell sets user-select: none for the popover chrome; fields must stay
+   editable. */
 input,
 textarea {
   user-select: text;
 }
 
-/* Icon button used in the header and footer. */
+/* Icon button used in the header and the footer. Sized to a real 28px hit
+   target and given a resting shape so the footer row reads as a designed
+   control strip rather than three loose glyphs. */
 .iconbtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  color: var(--dim);
-  transition: background 0.12s ease, color 0.12s ease;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    transform var(--motion-fast) var(--ease);
 }
 
 .iconbtn:hover {
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--text);
+  background: var(--overlay-hover);
+  color: var(--text-primary);
+}
+
+.iconbtn:active {
+  background: var(--overlay-press);
+  transform: scale(0.94);
+}
+
+/* The one text button in the app: Settings actions, the empty state call to action
+   and a tile's Retry were three different treatments before this. Variants change
+   --btn-fg / --btn-edge rather than restating the whole shape. Component styles are
+   emitted after this file, so a local rule can still override size. */
+.btn {
+  color: var(--btn-fg, var(--text-secondary));
+  /* Variants set the three --btn-* properties rather than restating `background` or
+     `border`, so a scoped component rule can never accidentally out-specify the shared
+     :hover and leave a button that does not react. */
+  background: var(--btn-fill, var(--surface-sunken));
+  border: 1px solid var(--btn-edge, var(--border));
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--type-meta);
+  white-space: nowrap;
+  transition:
+    background var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    transform var(--motion-fast) var(--ease);
+}
+
+.btn:hover {
+  background: var(--overlay-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.btn:active {
+  background: var(--overlay-press);
+  transform: scale(0.97);
+}
+
+/* One chip shape for every small label: the tile's plan badge, "session", the
+   provider count. Filled rather than outlined, so a chip never competes with the
+   hairline of the card it sits in. A chip that must warn keeps this shape and only
+   swaps the colours. */
+.chip {
+  flex: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-meta);
+  line-height: var(--leading-tight);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--text-secondary);
+  background: var(--overlay-hover);
 }
 
 .scroll {
@@ -98,6 +306,9 @@ textarea {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* Reserve the gutter so tiles do not shift sideways when the list grows
+     past the fold. */
+  scrollbar-gutter: stable;
 }
 
 .scroll::-webkit-scrollbar {
@@ -105,15 +316,22 @@ textarea {
 }
 
 .scroll::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.scroll:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  background-clip: content-box;
 }
 
 .scroll::-webkit-scrollbar-track {
   background: transparent;
 }
 
-/* Toggle switch. */
+/* Toggle switch. Green here means "on", not "healthy". */
 .switch {
   position: relative;
   width: 32px;
@@ -133,10 +351,10 @@ textarea {
 .switch span {
   position: absolute;
   inset: 0;
-  border-radius: 9px;
+  border-radius: var(--radius-pill);
   background: #2a2a30;
-  border: 1px solid var(--line);
-  transition: background 0.15s ease;
+  border: 1px solid var(--border);
+  transition: background var(--motion-fast) var(--ease);
   pointer-events: none;
 }
 
@@ -148,19 +366,34 @@ textarea {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: #8b8b94;
-  transition: transform 0.15s ease, background 0.15s ease;
+  background: var(--text-secondary);
+  transition:
+    transform var(--motion-fast) var(--ease),
+    background var(--motion-fast) var(--ease);
 }
 
 .switch input:checked + span {
-  background: #23532c;
+  background: var(--accent-on-track);
 }
 
 .switch input:checked + span::after {
   transform: translateX(14px);
-  background: var(--ok);
+  background: var(--accent-on);
 }
 
 .switch input:focus-visible + span {
-  border-color: rgba(255, 255, 255, 0.35);
+  border-color: var(--border-focus);
+}
+
+/* The user asked for no motion. One rule, app wide, so no component has to
+   remember: this also stops the footer refresh spinner. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

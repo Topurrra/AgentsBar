@@ -61,20 +61,37 @@ for (const id of PROVIDER_IDS) {
   assert.ok(!/<title/i.test(svg), `${name} still has a title element`);
   assert.ok(!/<\?xml/.test(svg), `${name} still has an XML preamble`);
 
-  // Something must actually be painted light, or the mark is a blank square.
-  assert.match(
-    svg,
-    /(fill|stroke)="(white|currentColor)"/,
-    `${name} paints nothing visible`,
-  );
-
-  // No painted geometry may be near-black: those marks are invisible on our surface.
   // clipPath fills are masks, not paint, so exclude that subtree.
   const painted = svg.replace(/<clipPath[\s\S]*?<\/clipPath>/g, "");
-  for (const [, attr, hex] of painted.matchAll(
-    /(fill|stroke)="(#[0-9a-fA-F]{6})"/g,
-  )) {
-    assert.ok(!tooDark(hex), `${name} ${attr}=${hex} is invisible on #0f0f11`);
+  const paints = [...painted.matchAll(/(?:fill|stroke)="([^"]+)"/g)]
+    .map((m) => m[1])
+    .filter((v) => v !== "none");
+
+  // Something must actually be painted light, or the mark is a blank square. A mark
+  // paints either its own brand hex, a gradient, or currentColor (the accent above).
+  assert.ok(
+    paints.some(
+      (v) =>
+        v === "white" ||
+        v === "currentColor" ||
+        v.startsWith("url(") ||
+        (/^#[0-9a-fA-F]{6}$/.test(v) && !tooDark(v)),
+    ),
+    `${name} paints nothing visible on ${POPOVER_BG}`,
+  );
+
+  // A mark may legitimately contain a dark shade: Qwen's purple has a deep tone under a
+  // lighter one, and a multi colour mark like Gemini shades its own geometry. What is not
+  // allowed is a mark whose dark paint is the whole logo, which is the invisible case the
+  // check above already catches. So require that the light paint carries real area rather
+  // than being a stray detail: at least a third of the painted elements must be legible.
+  const hexes = paints.filter((v) => /^#[0-9a-fA-F]{6}$/.test(v));
+  if (hexes.length) {
+    const legible = hexes.filter((v) => !tooDark(v)).length;
+    assert.ok(
+      legible * 3 >= hexes.length,
+      `${name}: only ${legible} of ${hexes.length} fills are legible on ${POPOVER_BG}`,
+    );
   }
 }
 

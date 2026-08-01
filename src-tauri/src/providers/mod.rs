@@ -27,6 +27,7 @@ pub mod minimax;
 pub mod openai;
 pub mod opencode;
 pub mod openrouter;
+pub mod qwen;
 pub mod t3chat;
 pub mod warp;
 pub mod windsurf;
@@ -433,6 +434,7 @@ pub fn all_providers() -> Vec<Box<dyn Provider>> {
         Box::new(windsurf::Windsurf),
         Box::new(augment::Augment),
         Box::new(amp::Amp),
+        Box::new(qwen::QwenCloud),
     ]
 }
 

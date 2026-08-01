@@ -1,6 +1,6 @@
 [package]
 name = "agentsbar"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI coding provider usage limits in the Windows system tray"
 authors = ["AgentsBar"]
 edition = "2021"

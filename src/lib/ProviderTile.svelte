@@ -24,6 +24,40 @@
   const windows = $derived(windowsOf(snapshot));
   const balance = $derived(credits(snapshot?.credits));
 
+  // Wave 6 state ramp. `tone()` still owns the thresholds; the only step added here is
+  // `spent`, which app.css defines for a window with nothing left at all. The names map
+  // one to one onto the --state-*-bar/-text/-edge/-weight groups in app.css.
+  const RAMP = { ok: "calm", warn: "watch", bad: "low", unknown: "unknown" };
+  const step = (left) => (left === 0 ? "spent" : RAMP[tone(left)]);
+
+  // The lane that actually constrains you: the lowest percent left. Ties go to the
+  // earlier lane because the backend sends the primary window first.
+  //
+  // A tile with lanes always has exactly one hero. When no lane carries a number the
+  // first one is it: the primary window is still the thing the tile is about, and an
+  // unknown hero is muted grey at regular weight anyway, so promoting it costs nothing
+  // in loudness and saves a one-lane tile from rendering with no focal point at all.
+  // -1 only when there are no lanes to choose from.
+  const binding = $derived.by(() => {
+    let at = windows.length ? 0 : -1;
+    let min = Infinity;
+    windows.forEach((w, i) => {
+      const left = percentLeft(w);
+      if (left !== null && left < min) {
+        min = left;
+        at = i;
+      }
+    });
+    return at;
+  });
+
+  // The tile frames itself from the binding lane, so a list of tiles can be scanned for
+  // trouble without reading a single number. Calm and unknown resolve to `transparent`
+  // in app.css, so those tiles keep the plain hairline.
+  const tileState = $derived(
+    binding < 0 ? "unknown" : step(percentLeft(windows[binding])),
+  );
+
   // Row 20: say how old this tile is once it is past two refresh intervals. Silence
   // below that, or every tile carries noise.
   const stale = $derived.by(() => {
@@ -36,19 +70,24 @@
 
 <!-- Only an auth failure gets the red border. A 502 that clears itself on the next tick
      must not look like something the user has to act on. -->
-<div class="tile" class:failed={fail?.tone === "bad"} style="--accent-soft: {accentSoft}">
+<div
+  class="tile {tileState}"
+  class:failed={fail?.tone === "bad"}
+  style="--accent-soft: {accentSoft}"
+>
+  <!-- The account is the least useful fact in the tile and used to eat the header, so it
+       is now the name's tooltip and nothing else. -->
   <div class="head">
-    <ProviderIcon id={provider.id} size={15} />
-    <span class="name">{provider.name}</span>
-    {#if snapshot?.plan}<span class="badge">{snapshot.plan}</span>{/if}
-    <span class="gap"></span>
-    {#if snapshot?.account}
-      <span class="account" title={snapshot.account}>{snapshot.account}</span>
+    <ProviderIcon id={provider.id} size={16} />
+    <span class="name" title={snapshot?.account ?? undefined}>{provider.name}</span>
+    {#if snapshot?.plan}
+      <!-- Shrinks and ellipses; it must never wrap and push the row to two lines. -->
+      <span class="chip badge" title={snapshot.plan}>{snapshot.plan}</span>
     {/if}
+    <span class="gap"></span>
     {#if stale}
       <span class="stale" title="Last fetched {snapshot.fetched_at}">{stale}</span>
     {/if}
-    <Sparkline {samples} width={52} height={14} />
   </div>
 
   <!-- The raw backend string stays on the title attribute: useless on screen, useful in a
@@ -57,7 +96,7 @@
     <div class="error {fail.tone}">
       <span class="msg" title={snapshot.error}>{fail.text}</span>
       {#if fail.retry}
-        <button class="retry" onclick={() => onRetry(provider.id)}>Retry</button>
+        <button class="btn retry" onclick={() => onRetry(provider.id)}>Retry</button>
       {/if}
     </div>
   {/if}
@@ -65,14 +104,20 @@
   <!-- Deliberately unkeyed: window labels are derived from the window length and two
        lanes of the same length share one. Row 36's keying is on provider_id, where the
        identity is real. -->
-  {#each windows as w}
+  {#each windows as w, i}
     {@const left = percentLeft(w)}
     {@const pc = pace(w, now)}
-    <div class="win">
+    <div class="win {step(left)}" class:hero={i === binding}>
       <div class="winhead">
         <span class="label">{w.label}</span>
         <span class="gap"></span>
-        <span class="pct {tone(left)}">{left === null ? "unknown" : left + "% left"}</span>
+        <span class="value">
+          {#if left === null}
+            <span class="pct">unknown</span>
+          {:else}
+            <span class="pct">{left}%</span><span class="unit">left</span>
+          {/if}
+        </span>
         {#if w.resets_at}
           <span class="reset">{countdown(w.resets_at, now)}</span>
         {/if}
@@ -88,7 +133,9 @@
         aria-valuenow={left ?? undefined}
         aria-valuetext={left === null ? "unknown" : left + "% left"}
       >
-        <div class="fill {tone(left)}" style="width: {left ?? 100}%"></div>
+        <!-- scaleX, not width: the bar settles on the compositor and never relayouts a
+             list of 23 tiles. -->
+        <div class="fill" style="--v: {(left ?? 100) / 100}"></div>
       </div>
       <!-- Row 26. Absent by design under 3% elapsed, on an exhausted window, and on any
            window we have no number for: see `pace` in tiles.js. -->
@@ -110,8 +157,12 @@
   {/each}
 
   {#if balance !== null}
-    <div class="credits">Credits <b>{balance}</b></div>
+    <div class="credits"><span class="k">Credits</span><b>{balance}</b></div>
   {/if}
+
+  <!-- Out of the header, where it read as a stray border, and across the foot of the
+       tile where the shape is actually a shape. -->
+  <Sparkline {samples} />
 
   {#if !snapshot && !windows.length}
     <div class="idle">
@@ -131,233 +182,294 @@
 
 <style>
   .tile {
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: var(--panel);
-    padding: 9px 10px 10px 11px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface-raised);
+    padding: var(--sp-4) var(--sp-5) var(--sp-5);
     /* One hairline of the brand color down the left edge. That is the whole accent. */
     box-shadow: inset 2px 0 0 var(--accent-soft);
   }
 
+  /* The frame is the list-level signal. A calm or unknown tile deliberately has no
+     frame of its own, which is the whole "healthy recedes" rule at tile scale. */
+  .tile.watch {
+    border-color: var(--state-watch-edge);
+  }
+
+  .tile.low {
+    border-color: var(--state-low-edge);
+  }
+
+  .tile.spent {
+    border-color: var(--state-spent-edge);
+  }
+
+  /* An auth failure outranks whatever the last good numbers said. */
   .tile.failed {
-    border-color: rgba(229, 83, 75, 0.35);
+    border-color: var(--state-low-edge);
   }
 
   .head {
     display: flex;
     align-items: center;
-    gap: 6px;
-  }
-
-  .head :global(.spark) {
-    margin-left: 2px;
+    gap: var(--sp-3);
   }
 
   .gap {
-    flex: 1;
+    flex: 1 1 0;
   }
 
   .name {
-    font-weight: 600;
-    letter-spacing: 0.1px;
+    flex: none;
+    font-size: var(--type-body);
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
   }
 
+  /* Shape comes from the shared .chip. The only thing the badge adds is the right to
+     shrink, so "Claude Max 20x" ellipses instead of wrapping the head onto two lines. */
   .badge {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    color: var(--dim);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    padding: 1px 5px;
+    flex: 0 1 auto;
   }
 
-  .account {
-    font-size: 11px;
-    color: var(--faint);
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  /* Old data is a caveat, not trouble, so it stays out of the state ramp's colours. */
+  .stale {
+    flex: none;
+    font-size: var(--type-meta);
+    color: var(--text-muted);
     white-space: nowrap;
   }
 
   .error {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
-    margin-top: 7px;
-    font-size: 11.5px;
+    gap: var(--sp-4);
+    margin-top: var(--sp-4);
+    font-size: var(--type-body);
   }
 
   /* Row 21 UI half. Red is reserved for the failures that stay broken until the user
      does something; a transient blip reads like the rest of the metadata. */
   .error.bad {
-    color: var(--bad);
+    color: var(--state-low-text);
   }
 
   .error.warn {
-    color: var(--warn);
+    color: var(--state-watch-text);
   }
 
   .error.muted {
-    color: var(--faint);
+    color: var(--text-muted);
+  }
+
+  /* A transient blip gets the neutral button; only a failure the user has to act on
+     borrows the ramp's red. Shape and press feedback are the shared .btn's. */
+  .retry {
+    --btn-fg: var(--state-low-text);
+    --btn-edge: var(--state-low-edge);
+    --btn-fill: none;
+    flex: none;
+    padding: var(--sp-1) var(--sp-3);
   }
 
   .error.muted .retry,
   .error.warn .retry {
-    color: var(--dim);
-    border-color: var(--line);
-  }
-
-  .error.muted .retry:hover,
-  .error.warn .retry:hover {
-    background: rgba(255, 255, 255, 0.07);
+    --btn-fg: var(--text-secondary);
+    --btn-edge: var(--border);
   }
 
   /* Row 22 copy is a sentence, not a status code, so it wraps instead of ellipsing away
      the half that says what to do. */
   .msg {
     flex: 1;
-    line-height: 1.4;
+    line-height: var(--leading-body);
   }
 
-  .retry {
-    flex: none;
-    color: var(--bad);
-    border: 1px solid rgba(229, 83, 75, 0.4);
-    border-radius: 5px;
-    padding: 1px 7px;
-    font-size: 11px;
-    transition: background 0.12s ease;
-  }
-
-  .retry:hover {
-    background: rgba(229, 83, 75, 0.14);
-  }
-
+  /* --- one lane -----------------------------------------------------------------
+     Every visual difference between a full lane and an exhausted one is these four
+     variables plus the bar height. Nothing here knows a hex. */
+  /* One step wider than the gap between a bar and its own pace line, so a lane reads as
+     one group instead of the rows blurring into a wall. */
   .win {
-    margin-top: 8px;
+    margin-top: var(--sp-5);
+  }
+
+  .win.calm {
+    --s-bar: var(--state-calm-bar);
+    --s-text: var(--state-calm-text);
+    --s-weight: var(--state-calm-weight);
+  }
+
+  .win.watch {
+    --s-bar: var(--state-watch-bar);
+    --s-text: var(--state-watch-text);
+    --s-weight: var(--state-watch-weight);
+  }
+
+  .win.low {
+    --s-bar: var(--state-low-bar);
+    --s-text: var(--state-low-text);
+    --s-weight: var(--state-low-weight);
+  }
+
+  .win.spent {
+    --s-bar: var(--state-spent-bar);
+    --s-text: var(--state-spent-text);
+    --s-weight: var(--state-spent-weight);
+  }
+
+  .win.unknown {
+    --s-bar: var(--state-unknown-bar);
+    --s-text: var(--state-unknown-text);
+    --s-weight: var(--state-unknown-weight);
   }
 
   .winhead {
     display: flex;
     align-items: baseline;
-    gap: 8px;
-    font-size: 11.5px;
-    margin-bottom: 4px;
+    gap: var(--sp-3);
+    margin-bottom: var(--sp-2);
   }
 
   .label {
-    color: var(--dim);
+    font-size: var(--type-meta);
+    line-height: var(--leading-tight);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
+    color: var(--text-muted);
+  }
+
+  .win.hero .label {
+    color: var(--text-secondary);
+  }
+
+  .value {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-1);
   }
 
   .pct {
-    font-variant-numeric: tabular-nums;
+    font-size: var(--type-body);
+    line-height: var(--leading-tight);
+    color: var(--s-text);
+    font-weight: var(--s-weight);
+  }
+
+  /* The one number the popover exists to show. Size is the hierarchy; colour and weight
+     only arrive when the ramp says there is something to worry about. */
+  .win.hero .pct {
+    font-size: var(--type-hero);
+  }
+
+  .unit {
+    font-size: var(--type-meta);
+    color: var(--text-muted);
+    margin-left: 3px;
   }
 
   .reset {
-    color: var(--faint);
-    font-variant-numeric: tabular-nums;
-    min-width: 42px;
+    font-size: var(--type-meta);
+    color: var(--text-muted);
+    min-width: 46px;
     text-align: right;
   }
 
-  .stale {
-    font-size: 10.5px;
-    color: var(--warn);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-
   .track {
-    height: 5px;
-    border-radius: 3px;
-    background: var(--track);
+    height: var(--bar-h-sub);
+    border-radius: var(--radius-pill);
+    background: var(--surface-track);
     overflow: hidden;
   }
 
-  .capnote {
-    margin-top: 4px;
-    font-size: 10.5px;
-    color: var(--faint);
+  /* Only one lane per tile gets the thick bar, so which window binds is legible from
+     across the room without reading a label. */
+  .win.hero .track {
+    height: var(--bar-h-hero);
   }
 
-  /* Row 26. Secondary to the bar it sits under: the percent is the headline, the pace is
-     the sentence about it. */
+  /* An exhausted lane draws a zero width fill, which left the single worst state in the
+     app as the one with the least ink on screen. Tinting the TRACK, not the fill, says
+     "this whole window is gone" without claiming a measurement that is not there. */
+  .win.spent .track {
+    background: var(--state-spent-edge);
+  }
+
+  .fill {
+    height: 100%;
+    width: 100%;
+    border-radius: inherit;
+    background: var(--s-bar);
+    transform: scaleX(var(--v, 1));
+    transform-origin: left center;
+    transition:
+      transform var(--motion-slow) var(--ease),
+      background-color var(--motion-fast) var(--ease);
+  }
+
+  /* Hatched, not solid: a full flat bar in any colour would read as a measurement. */
+  .win.unknown .fill {
+    background: repeating-linear-gradient(
+      -45deg,
+      var(--state-unknown-bar) 0 3px,
+      transparent 3px 6px
+    );
+  }
+
+  .capnote {
+    margin-top: var(--sp-2);
+    font-size: var(--type-meta);
+    color: var(--text-muted);
+  }
+
+  /* Row 26. Subordinate to the value it qualifies: the percent is the headline, this is
+     the sentence about it, so it sits a full type step below. */
   .pace {
     display: flex;
-    gap: 5px;
-    margin-top: 4px;
-    font-size: 10.5px;
-    color: var(--faint);
-    font-variant-numeric: tabular-nums;
+    gap: var(--sp-2);
+    margin-top: var(--sp-2);
+    font-size: var(--type-meta);
+    color: var(--text-muted);
   }
 
+  /* Burning faster than the window refills is the only half of pace worth a colour.
+     Being ahead is the boring case and stays silent. */
   .pace .deficit {
-    color: var(--warn);
-  }
-
-  .pace .reserve {
-    color: var(--ok);
+    color: var(--state-watch-text);
   }
 
   .pace .sep {
     opacity: 0.55;
   }
 
-  .fill {
-    height: 100%;
-    border-radius: 3px;
-    transition: width 0.25s ease;
-  }
-
-  .ok {
-    color: var(--ok);
-  }
-  .warn {
-    color: var(--warn);
-  }
-  .bad {
-    color: var(--bad);
-  }
-  .unknown {
-    color: var(--faint);
-  }
-
-  .fill.ok {
-    background: var(--ok);
-  }
-  .fill.warn {
-    background: var(--warn);
-  }
-  .fill.bad {
-    background: var(--bad);
-  }
-  /* Hatched, not solid: a full flat bar in any colour would read as a measurement. */
-  .fill.unknown {
-    background: repeating-linear-gradient(
-      -45deg,
-      var(--hatch) 0 3px,
-      transparent 3px 6px
-    );
-  }
-
   .credits {
-    margin-top: 8px;
-    font-size: 11.5px;
-    color: var(--dim);
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-3);
+    margin-top: var(--sp-4);
+  }
+
+  .credits .k {
+    font-size: var(--type-meta);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
+    color: var(--text-muted);
   }
 
   .credits b {
-    color: var(--text);
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
+    font-size: var(--type-body);
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
+  }
+
+  .tile :global(.spark) {
+    margin-top: var(--sp-5);
   }
 
   .idle {
-    margin-top: 7px;
-    font-size: 11.5px;
-    line-height: 1.45;
-    color: var(--faint);
+    margin-top: var(--sp-4);
+    font-size: var(--type-body);
+    line-height: var(--leading-body);
+    color: var(--text-muted);
   }
 </style>

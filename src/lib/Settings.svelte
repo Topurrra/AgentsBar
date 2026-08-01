@@ -168,58 +168,72 @@
 </script>
 
 <div class="scroll">
+  <div class="secthead">
+    <h2>General</h2>
+  </div>
+
   <section>
-    <div class="row">
-      <label for="cadence">Refresh</label>
-      <span class="gap"></span>
-      <select id="cadence" class="cadence" value={adaptive ? "adaptive" : "fixed"} onchange={setCadence}>
-        <option value="adaptive">Adaptive</option>
-        <option value="fixed">Every</option>
-      </select>
-      {#if !adaptive}
-        <input
-          id="ivl"
-          type="number"
-          min="1"
-          step="1"
-          class="num"
-          aria-label="Refresh interval in minutes"
-          value={config?.refresh_minutes ?? 5}
-          onchange={setInterval_}
-        />
-        <span class="unit">min</span>
+    <div class="field">
+      <div class="row">
+        <label for="cadence">Refresh</label>
+        <span class="gap"></span>
+        <span class="sel cadence">
+          <select id="cadence" value={adaptive ? "adaptive" : "fixed"} onchange={setCadence}>
+            <option value="adaptive">Adaptive</option>
+            <option value="fixed">Every</option>
+          </select>
+        </span>
+        {#if !adaptive}
+          <input
+            id="ivl"
+            type="number"
+            min="1"
+            step="1"
+            class="num"
+            aria-label="Refresh interval in minutes"
+            value={config?.refresh_minutes ?? 5}
+            onchange={setInterval_}
+          />
+          <span class="unit">min</span>
+        {/if}
+      </div>
+      {#if adaptive}
+        <p class="note">
+          Checks often just after you open AgentsBar and backs off to 30 minutes while you
+          are away, or on battery saver.
+        </p>
       {/if}
     </div>
-    {#if adaptive}
-      <p class="note tight">
-        Checks often just after you open AgentsBar and backs off to 30 minutes while you
-        are away, or on battery saver.
-      </p>
-    {/if}
 
-    <div class="row">
-      <label for="startup">Launch at startup</label>
-      <span class="gap"></span>
-      <span class="switch">
-        <input
-          id="startup"
-          type="checkbox"
-          checked={!!config?.launch_at_startup}
-          onchange={setStartup}
-        />
-        <span></span>
-      </span>
+    <div class="field">
+      <div class="row">
+        <label for="startup">Launch at startup</label>
+        <span class="gap"></span>
+        <span class="switch">
+          <input
+            id="startup"
+            type="checkbox"
+            checked={!!config?.launch_at_startup}
+            onchange={setStartup}
+          />
+          <span></span>
+        </span>
+      </div>
     </div>
 
-    <div class="row">
-      <label for="pinned">Tray provider</label>
-      <span class="gap"></span>
-      <select id="pinned" value={config?.pinned_provider ?? ""} onchange={setPinned}>
-        <option value="">Auto</option>
-        {#each providers as p (p.id)}
-          <option value={p.id}>{p.name}</option>
-        {/each}
-      </select>
+    <div class="field">
+      <div class="row">
+        <label for="pinned">Tray provider</label>
+        <span class="gap"></span>
+        <span class="sel">
+          <select id="pinned" value={config?.pinned_provider ?? ""} onchange={setPinned}>
+            <option value="">Auto</option>
+            {#each providers as p (p.id)}
+              <option value={p.id}>{p.name}</option>
+            {/each}
+          </select>
+        </span>
+      </div>
     </div>
   </section>
 
@@ -228,33 +242,52 @@
   </div>
 
   <section>
-    <div class="row">
-      <label for="diag">Diagnostics report</label>
-      <span class="gap"></span>
-      <button id="diag" class="docs" onclick={exportReport}>Copy report</button>
-      <button class="docs" onclick={clearCookies}>Clear cached cookies</button>
+    <div class="field">
+      <div class="row wrap">
+        <label for="diag">Diagnostics report</label>
+        <span class="gap"></span>
+        <span class="btns">
+          <button id="diag" class="btn" onclick={exportReport}>Copy report</button>
+          <button class="btn" onclick={clearCookies}>Clear cached cookies</button>
+        </span>
+      </div>
+      {#if note}
+        <p class="note">{note}</p>
+      {/if}
+      {#if report}
+        <textarea class="report" readonly rows="6" spellcheck="false" value={report}></textarea>
+      {/if}
     </div>
-    {#if note}
-      <p class="note tight">{note}</p>
-    {/if}
-    {#if report}
-      <textarea class="report" readonly rows="6" spellcheck="false" value={report}></textarea>
-    {/if}
   </section>
 
   <div class="secthead">
     <h2>Providers</h2>
-    <span class="count">{onCount} on</span>
+    <span class="chip count">{onCount} on</span>
     <span class="gap"></span>
-    <input
-      class="search"
-      type="search"
-      placeholder="Search"
-      aria-label="Search providers"
-      autocomplete="off"
-      spellcheck="false"
-      bind:value={query}
-    />
+    <span class="searchwrap">
+      <svg
+        class="searchico"
+        width="11"
+        height="11"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.7"
+        aria-hidden="true"
+      >
+        <circle cx="6.8" cy="6.8" r="4.6" />
+        <path d="M10.3 10.3 14 14" stroke-linecap="round" />
+      </svg>
+      <input
+        class="search"
+        type="search"
+        placeholder="Search"
+        aria-label="Search providers"
+        autocomplete="off"
+        spellcheck="false"
+        bind:value={query}
+      />
+    </span>
   </div>
 
   {#if !providers.length}
@@ -269,31 +302,36 @@
     {@const manual = MANUAL_ONLY[p.id]}
     {@const stored = sourceOf(e)}
     {@const src = manual && stored !== "off" ? "manual" : stored}
-    <div class="prov" style="--accent-soft: {providerAccent(p.id)}40">
+    <div
+      class="prov"
+      class:on={e.enabled}
+      style="--accent-soft: {providerAccent(p.id)}40"
+    >
       <div class="row">
-        <ProviderIcon id={p.id} size={15} />
+        <span class="ico"><ProviderIcon id={p.id} size={15} /></span>
         <span class="name">{p.name}</span>
         {#if cookie}
-          <span class="chip">session</span>
+          <span class="chip kind">session</span>
         {/if}
         {#if e.enabled && !p.configured}
-          <span class="tag">needs auth</span>
+          <span class="chip tag">needs auth</span>
         {/if}
         <span class="gap"></span>
         {#if p.doc_url}
-          <button class="docs" onclick={() => openUrl(p.doc_url)}>Docs</button>
+          <button class="btn docs" onclick={() => openUrl(p.doc_url)}>Docs</button>
         {/if}
         {#if cookie}
-          <select
-            class="src"
-            aria-label={"Cookie source for " + p.name}
-            value={src}
-            onchange={(ev) => saveSource(p.id, ev.currentTarget.value, e.cookie_browser)}
-          >
-            {#if !manual}<option value="auto">Auto</option>{/if}
-            <option value="manual">Manual</option>
-            <option value="off">Off</option>
-          </select>
+          <span class="sel src">
+            <select
+              aria-label={"Cookie source for " + p.name}
+              value={src}
+              onchange={(ev) => saveSource(p.id, ev.currentTarget.value, e.cookie_browser)}
+            >
+              {#if !manual}<option value="auto">Auto</option>{/if}
+              <option value="manual">Manual</option>
+              <option value="off">Off</option>
+            </select>
+          </span>
         {:else}
           <span class="switch">
             <input
@@ -312,16 +350,18 @@
           <div class="row">
             <label for={"br-" + p.id} class="sublabel">Browser</label>
             <span class="gap"></span>
-            <select
-              id={"br-" + p.id}
-              value={e.cookie_browser ?? ""}
-              onchange={(ev) => saveSource(p.id, "auto", ev.currentTarget.value)}
-            >
-              <option value="">Any detected</option>
-              {#each browsers as b (b.id)}
-                <option value={b.id}>{b.label}{b.supported ? "" : " (limited)"}</option>
-              {/each}
-            </select>
+            <span class="sel">
+              <select
+                id={"br-" + p.id}
+                value={e.cookie_browser ?? ""}
+                onchange={(ev) => saveSource(p.id, "auto", ev.currentTarget.value)}
+              >
+                <option value="">Any detected</option>
+                {#each browsers as b (b.id)}
+                  <option value={b.id}>{b.label}{b.supported ? "" : " (limited)"}</option>
+                {/each}
+              </select>
+            </span>
           </div>
           {#if !browsers.length}
             <p class="note">
@@ -334,221 +374,393 @@
         </div>
       {:else if cookie && src === "manual"}
         <div class="sub">
-          <textarea
-            class="key"
-            rows="2"
-            placeholder={p.configured
-              ? "Saved, paste to replace"
-              : (manual?.placeholder ?? "name=value; name2=value2")}
-            autocomplete="off"
-            spellcheck="false"
-            oninput={(ev) => (ev.currentTarget.dataset.edited = "1")}
-            onblur={(ev) => saveHeader(p.id, ev)}
-          ></textarea>
+          <span class="secret" class:saved={p.configured}>
+            <svg
+              class="lockico"
+              width="11"
+              height="11"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              aria-hidden="true"
+            >
+              <rect x="3.2" y="7" width="9.6" height="6.6" rx="1.6" />
+              <path d="M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7" stroke-linecap="round" />
+            </svg>
+            <textarea
+              class="key"
+              rows="2"
+              placeholder={p.configured
+                ? "Saved, paste to replace"
+                : (manual?.placeholder ?? "name=value; name2=value2")}
+              autocomplete="off"
+              spellcheck="false"
+              oninput={(ev) => (ev.currentTarget.dataset.edited = "1")}
+              onblur={(ev) => saveHeader(p.id, ev)}
+            ></textarea>
+          </span>
           <p class="note">
             {manual?.note ??
               "Paste the Cookie header from your signed in browser. Stored like an API key and never shown again."}
           </p>
         </div>
       {:else if needsKey(p)}
-        <input
-          type="password"
-          class="key"
-          placeholder={p.configured
-            ? "Saved, type to replace"
-            : p.auth === "token"
-              ? "Token"
-              : "API key"}
-          autocomplete="off"
-          spellcheck="false"
-          value=""
-          oninput={(ev) => (ev.currentTarget.dataset.edited = "1")}
-          onblur={(ev) => saveKey(p.id, ev)}
-        />
+        <span class="secret" class:saved={p.configured}>
+          <svg
+            class="lockico"
+            width="11"
+            height="11"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            aria-hidden="true"
+          >
+            <rect x="3.2" y="7" width="9.6" height="6.6" rx="1.6" />
+            <path d="M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7" stroke-linecap="round" />
+          </svg>
+          <input
+            type="password"
+            class="key"
+            placeholder={p.configured
+              ? "Saved, type to replace"
+              : p.auth === "token"
+                ? "Token"
+                : "API key"}
+            autocomplete="off"
+            spellcheck="false"
+            value=""
+            oninput={(ev) => (ev.currentTarget.dataset.edited = "1")}
+            onblur={(ev) => saveKey(p.id, ev)}
+          />
+        </span>
       {/if}
     </div>
   {/each}
 </div>
 
 <style>
+  /* Same 12px card inset as the tile list: the right value is one step down because
+     .scroll reserves a stable 8px scrollbar gutter on top of it. */
   .scroll {
-    padding: 10px;
+    padding: var(--sp-1) var(--sp-2) var(--sp-6) var(--sp-5);
   }
 
+  /* --- Section rhythm -----------------------------------------------------
+     A heading sits outside its card, so the eye gets label, group, label,
+     group instead of one undifferentiated scroll of boxes. */
+  .secthead {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    margin: var(--sp-6) 0 var(--sp-3);
+  }
+
+  .secthead:first-child {
+    margin-top: var(--sp-4);
+  }
+
+  h2 {
+    margin: 0;
+    font-size: var(--type-meta);
+    font-weight: var(--weight-medium);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
+    color: var(--text-secondary);
+  }
+
+  .count {
+    color: var(--text-muted);
+  }
+
+  /* --- Grouped card -------------------------------------------------------
+     One card per section, hairline between rows. A divider that only spans
+     the text column would ripple; these run the full width of the card. */
   section {
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: var(--panel);
-    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface-raised);
+    overflow: hidden;
+  }
+
+  .field {
+    padding: 0 var(--sp-5);
+  }
+
+  .field + .field {
+    border-top: 1px solid var(--border);
   }
 
   .row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-height: 34px;
+    gap: var(--sp-4);
+    min-height: 36px;
+  }
+
+  /* Two buttons plus a label do not fit on 380px, so the pair drops to its own
+     line as a unit and stays right aligned instead of breaking apart. */
+  .row.wrap {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: var(--sp-3);
+    padding: var(--sp-3) 0;
+  }
+
+  .btns {
+    display: flex;
+    flex: none;
+    gap: var(--sp-3);
   }
 
   .gap {
     flex: 1;
   }
 
-  label,
-  .name {
-    color: var(--text);
-  }
-
-  .name {
-    font-weight: 600;
+  label {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
   }
 
   .num {
-    width: 54px;
+    width: 52px;
     text-align: right;
   }
 
   .unit {
-    color: var(--faint);
-    font-size: 11px;
-    width: 20px;
+    color: var(--text-muted);
+    font-size: var(--type-meta);
+    width: 18px;
   }
 
-  select {
+  /* --- Controls -----------------------------------------------------------
+     The native select arrow is the one piece of browser chrome that reads as
+     unstyled on a dark surface, so it is replaced by a chevron drawn from two
+     borders in currentColor: no image, no icon font, nothing to load. */
+  .sel {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+  }
+
+  .sel select {
+    appearance: none;
     max-width: 150px;
+    padding-right: 22px;
+    cursor: pointer;
   }
 
-  .src {
-    font-size: 12px;
-    padding: 3px 6px;
+  .sel::after {
+    content: "";
+    position: absolute;
+    right: 9px;
+    top: 50%;
+    width: 5px;
+    height: 5px;
+    border-right: 1.5px solid var(--text-muted);
+    border-bottom: 1.5px solid var(--text-muted);
+    transform: translateY(-70%) rotate(45deg);
+    pointer-events: none;
   }
 
-  .secthead {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 16px 0 6px 0;
+  .sel:hover::after {
+    border-color: var(--text-secondary);
   }
 
-  h2 {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: var(--faint);
-    font-weight: 600;
-    margin: 0 0 0 2px;
+  .cadence select {
+    max-width: 96px;
   }
 
-  .count {
-    font-size: 11px;
-    color: var(--dim);
-    font-variant-numeric: tabular-nums;
+  .src select {
+    padding: var(--sp-1) 20px var(--sp-1) var(--sp-3);
   }
 
-  .search {
-    width: 118px;
-    font-size: 12px;
-    padding: 3px 7px;
+  .src::after {
+    right: 7px;
   }
 
+  /* Shape, hover and press come from the shared .btn in app.css. Docs is the quiet
+     variant: no fill, tighter box, same radius as every other button. */
+  .docs {
+    --btn-fill: none;
+    padding: var(--sp-1) var(--sp-3);
+  }
+
+  /* --- Provider card ------------------------------------------------------
+     Enabled and disabled must be legible at a glance across 23 rows: an on
+     provider is a filled card with its brand rule and a full contrast name,
+     an off one is an outline with a desaturated mark. Nothing animates. */
   .prov {
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: var(--panel);
-    padding: 2px 10px 8px 11px;
-    margin-bottom: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: transparent;
+    padding: 0 var(--sp-5) var(--sp-3);
+    margin-bottom: var(--sp-3);
+    overflow: hidden;
+    transition: border-color var(--motion-fast) var(--ease);
+  }
+
+  .prov.on {
+    background: var(--surface-raised);
     box-shadow: inset 2px 0 0 var(--accent-soft);
   }
 
+  .prov:hover {
+    border-color: var(--border-strong);
+  }
+
   .prov .row {
-    min-height: 32px;
+    min-height: 34px;
+    gap: var(--sp-3);
+  }
+
+  .ico {
+    display: flex;
+    flex: none;
+    filter: grayscale(1);
+    opacity: 0.45;
+  }
+
+  .prov.on .ico {
+    filter: none;
+    opacity: 1;
+  }
+
+  .name {
+    color: var(--text-secondary);
+    font-weight: var(--weight-regular);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .prov.on .name {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
   }
 
   /* Cookie providers get an indented block instead of a bare field, so the browser
-     picker reads as belonging to that provider. */
+     picker reads as belonging to that provider. The negative margin lets the rule
+     span the whole card. */
   .sub {
-    border-top: 1px solid var(--line);
-    margin-top: 2px;
-    padding-top: 2px;
+    border-top: 1px solid var(--border);
+    margin: 0 calc(-1 * var(--sp-5));
+    padding: 0 var(--sp-5) var(--sp-2);
   }
 
   .sublabel {
-    color: var(--dim);
-    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: var(--weight-regular);
   }
 
-  .chip {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    color: var(--dim);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    padding: 1px 5px;
-  }
-
+  /* Both are the shared .chip. "session" is a category label so it takes the same
+     uppercase micro treatment as a window label in a tile; "needs auth" is the one
+     chip that has to warn, and it swaps colour without changing shape. */
+  .kind,
   .tag {
-    font-size: 10px;
-    color: var(--warn);
-    border: 1px solid rgba(214, 160, 40, 0.35);
-    border-radius: 4px;
-    padding: 1px 5px;
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
   }
 
-  .docs {
-    font-size: 11px;
-    color: var(--dim);
-    border: 1px solid var(--line);
-    border-radius: 5px;
-    padding: 1px 7px;
-    transition: background 0.12s ease, color 0.12s ease;
+  .kind {
+    color: var(--text-muted);
   }
 
-  .docs:hover {
-    background: rgba(255, 255, 255, 0.07);
-    color: var(--text);
+  /* Same fill as every other chip; only the ink changes. Tinting the fill too would
+     drop the amber on amber contrast to 4.2:1, and colour alone already reads. */
+  .tag {
+    color: var(--state-watch-text);
+  }
+
+  /* --- Secret fields ------------------------------------------------------
+     The stored value is never sent back to the UI, so the field is always
+     empty; the lock plus the placeholder are the only thing telling the user
+     whether a key exists. A saved field says so at readable contrast, an
+     empty one stays muted like the prompt it is. */
+  .secret {
+    position: relative;
+    display: block;
+    margin-top: var(--sp-2);
+  }
+
+  .lockico {
+    position: absolute;
+    left: var(--sp-4);
+    top: var(--sp-4);
+    color: var(--text-muted);
+    pointer-events: none;
+  }
+
+  .secret.saved .lockico {
+    color: var(--text-secondary);
   }
 
   .key {
     width: 100%;
-    margin-top: 2px;
-    font-size: 12px;
+    padding-left: 26px;
     letter-spacing: 0.5px;
+  }
+
+  .key::placeholder {
+    color: var(--text-muted);
+    letter-spacing: normal;
+  }
+
+  .secret.saved .key::placeholder {
+    color: var(--text-secondary);
   }
 
   textarea.key {
     resize: none;
-    line-height: 1.4;
+    line-height: var(--leading-body);
   }
 
   .note {
-    margin: 5px 0 2px;
-    font-size: 11px;
-    line-height: 1.45;
-    color: var(--faint);
+    margin: 0 0 var(--sp-3);
+    font-size: var(--type-meta);
+    line-height: var(--leading-body);
+    color: var(--text-muted);
   }
 
-  .note.tight {
-    margin: 0 0 8px;
+  .searchwrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
   }
 
-  .cadence {
-    max-width: 96px;
+  .searchico {
+    position: absolute;
+    left: var(--sp-3);
+    color: var(--text-muted);
+    pointer-events: none;
+  }
+
+  .search {
+    width: 132px;
+    padding: var(--sp-2) var(--sp-3) var(--sp-2) 22px;
+  }
+
+  .search::-webkit-search-cancel-button {
+    cursor: pointer;
   }
 
   /* The report is the one place in the app where text is meant to be selected: the whole
      point is getting it into an issue. */
   .report {
     width: 100%;
-    margin: 0 0 8px;
+    margin: 0 0 var(--sp-4);
     font-family: ui-monospace, Consolas, monospace;
-    font-size: 11px;
-    line-height: 1.4;
+    font-size: var(--type-meta);
+    line-height: var(--leading-body);
     resize: none;
     user-select: text;
   }
 
   .hint {
-    margin: 0 0 8px 2px;
-    color: var(--faint);
+    margin: 0;
+    padding: var(--sp-7) 0;
+    text-align: center;
+    color: var(--text-muted);
   }
 </style>
