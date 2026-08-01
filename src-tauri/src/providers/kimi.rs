@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::api_token::{api_key, get_json, loose_f64, parse_rfc3339, Auth};
+use super::api_token::{api_key, get_json, has_api_key, loose_f64, parse_rfc3339, Auth};
 use super::util::percent;
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow};
 use crate::config::Config;
@@ -138,14 +138,18 @@ impl Provider for Kimi {
         "https://platform.moonshot.ai"
     }
 
+    fn env_key(&self) -> Option<&'static str> {
+        Some("KIMI_CODE_API_KEY")
+    }
+
     fn is_configured(&self, config: &Config) -> bool {
-        config.api_key(self.id()).is_some()
+        has_api_key(config, self)
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let key = api_key(&ctx.config, self.id())?;
+        let key = api_key(&ctx.config, self)?;
         let url = format!("{}/coding/v1/usages", base_url());
-        let response: UsageResponse = get_json(&ctx.http, &url, &Auth::Bearer(key), &[]).await?;
+        let response: UsageResponse = get_json(&ctx.http, &url, &Auth::Bearer(&key), &[]).await?;
         Ok(to_snapshot(&response))
     }
 }

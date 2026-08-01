@@ -1,11 +1,23 @@
 <script>
   import { percentLeft, tone, countdown, credits } from "./format.js";
-  import { windowsOf, ago } from "./tiles.js";
+  import { windowsOf, ago, pace, errorCopy } from "./tiles.js";
   import { providerAccent } from "./icons.js";
   import ProviderIcon from "./ProviderIcon.svelte";
   import Sparkline from "./Sparkline.svelte";
 
-  let { provider, snapshot, samples = [], now, staleMs = 600000, onRetry } = $props();
+  let {
+    provider,
+    snapshot,
+    samples = [],
+    now,
+    staleMs = 600000,
+    cookieSource = null,
+    onRetry,
+  } = $props();
+
+  // Rows 21 and 22. The wording and the tone both come from `error_kind`, never from the
+  // message text. `fail` is null whenever there is nothing wrong.
+  const fail = $derived(errorCopy(provider, snapshot, cookieSource));
 
   // Row 25: the backend already applied the cap (an exhausted longer window binds every
   // shorter one) so the tray and the tile cannot disagree about it.
@@ -22,7 +34,9 @@
   const accentSoft = $derived(providerAccent(provider.id) + "40");
 </script>
 
-<div class="tile" class:failed={!!snapshot?.error} style="--accent-soft: {accentSoft}">
+<!-- Only an auth failure gets the red border. A 502 that clears itself on the next tick
+     must not look like something the user has to act on. -->
+<div class="tile" class:failed={fail?.tone === "bad"} style="--accent-soft: {accentSoft}">
   <div class="head">
     <ProviderIcon id={provider.id} size={15} />
     <span class="name">{provider.name}</span>
@@ -37,10 +51,14 @@
     <Sparkline {samples} width={52} height={14} />
   </div>
 
-  {#if snapshot?.error}
-    <div class="error">
-      <span class="msg" title={snapshot.error}>{snapshot.error}</span>
-      <button class="retry" onclick={() => onRetry(provider.id)}>Retry</button>
+  <!-- The raw backend string stays on the title attribute: useless on screen, useful in a
+       support thread. -->
+  {#if fail}
+    <div class="error {fail.tone}">
+      <span class="msg" title={snapshot.error}>{fail.text}</span>
+      {#if fail.retry}
+        <button class="retry" onclick={() => onRetry(provider.id)}>Retry</button>
+      {/if}
     </div>
   {/if}
 
@@ -49,6 +67,7 @@
        identity is real. -->
   {#each windows as w}
     {@const left = percentLeft(w)}
+    {@const pc = pace(w, now)}
     <div class="win">
       <div class="winhead">
         <span class="label">{w.label}</span>
@@ -71,6 +90,19 @@
       >
         <div class="fill {tone(left)}" style="width: {left ?? 100}%"></div>
       </div>
+      <!-- Row 26. Absent by design under 3% elapsed, on an exhausted window, and on any
+           window we have no number for: see `pace` in tiles.js. -->
+      {#if pc}
+        <div class="pace">
+          <span class={pc.state}>{pc.label}</span>
+          <!-- Null inside the pace band when the projection would argue with the label:
+               see `pace` in tiles.js. -->
+          {#if pc.eta}
+            <span class="sep">·</span>
+            <span>{pc.eta}</span>
+          {/if}
+        </div>
+      {/if}
       {#if w.capped_by}
         <div class="capnote">Capped by {w.capped_by}</div>
       {/if}
@@ -151,18 +183,42 @@
 
   .error {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     margin-top: 7px;
     font-size: 11.5px;
+  }
+
+  /* Row 21 UI half. Red is reserved for the failures that stay broken until the user
+     does something; a transient blip reads like the rest of the metadata. */
+  .error.bad {
     color: var(--bad);
   }
 
+  .error.warn {
+    color: var(--warn);
+  }
+
+  .error.muted {
+    color: var(--faint);
+  }
+
+  .error.muted .retry,
+  .error.warn .retry {
+    color: var(--dim);
+    border-color: var(--line);
+  }
+
+  .error.muted .retry:hover,
+  .error.warn .retry:hover {
+    background: rgba(255, 255, 255, 0.07);
+  }
+
+  /* Row 22 copy is a sentence, not a status code, so it wraps instead of ellipsing away
+     the half that says what to do. */
   .msg {
     flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.4;
   }
 
   .retry {
@@ -224,6 +280,29 @@
     margin-top: 4px;
     font-size: 10.5px;
     color: var(--faint);
+  }
+
+  /* Row 26. Secondary to the bar it sits under: the percent is the headline, the pace is
+     the sentence about it. */
+  .pace {
+    display: flex;
+    gap: 5px;
+    margin-top: 4px;
+    font-size: 10.5px;
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pace .deficit {
+    color: var(--warn);
+  }
+
+  .pace .reserve {
+    color: var(--ok);
+  }
+
+  .pace .sep {
+    opacity: 0.55;
   }
 
   .fill {

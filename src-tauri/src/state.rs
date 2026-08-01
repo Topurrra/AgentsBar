@@ -17,6 +17,11 @@ pub struct AppState {
     pub config: RwLock<Config>,
     /// Sparkline samples, loaded from disk at startup and appended after each refresh.
     pub history: RwLock<History>,
+    /// Row 23. Per provider "do not call before": set on a rate limit or a server error,
+    /// cleared on success. Deliberately not persisted, since a restart is itself a fresh
+    /// intent to fetch, and deliberately keyed by provider rather than shared, because a
+    /// batch-wide backoff would need a contract for partial success that we do not have.
+    skip_until: RwLock<HashMap<String, DateTime<Utc>>>,
     pub http: reqwest::Client,
 }
 
@@ -54,14 +59,66 @@ impl AppState {
             snapshots: RwLock::new(HashMap::new()),
             config: RwLock::new(config),
             history: RwLock::new(History::load()),
+            skip_until: RwLock::new(HashMap::new()),
             http,
         }
+    }
+
+    // ------------------------------------------------------------- row 23, backoff
+
+    /// Whether the periodic loop should leave `id` alone for now.
+    ///
+    /// A manual refresh must NOT consult this: being stuck behind a cooldown with no way
+    /// to force a retry is worse than the extra request, and it is the first thing a user
+    /// does when a tile looks wrong.
+    pub async fn is_skipped(&self, id: &str) -> bool {
+        self.skip_until
+            .read()
+            .await
+            .get(id)
+            .is_some_and(|at| *at > Utc::now())
+    }
+
+    /// Hold `id` back until `until`. An earlier deadline never shortens one already set,
+    /// so a provider that keeps failing cannot walk its own cooldown backwards.
+    pub async fn skip_provider(&self, id: &str, until: DateTime<Utc>) {
+        let mut map = self.skip_until.write().await;
+        let entry = map.entry(id.to_string()).or_insert(until);
+        *entry = (*entry).max(until);
+    }
+
+    /// Clear the cooldown. Called on any success.
+    pub async fn clear_skip(&self, id: &str) {
+        self.skip_until.write().await.remove(id);
+    }
+
+    /// Deadlines still in force, for the diagnostics report and for tests.
+    pub async fn skips(&self) -> Vec<(String, DateTime<Utc>)> {
+        let now = Utc::now();
+        let mut live: Vec<(String, DateTime<Utc>)> = self
+            .skip_until
+            .read()
+            .await
+            .iter()
+            .filter(|(_, at)| **at > now)
+            .map(|(id, at)| (id.clone(), *at))
+            .collect();
+        live.sort();
+        live
     }
 
     /// Append a sample per successful snapshot and persist if anything changed.
     /// Call after a refresh has stored its snapshots.
     pub async fn record_history(&self, snapshots: &[UsageSnapshot]) {
-        let refresh_secs = self.config.read().await.refresh_minutes.saturating_mul(60) as i64;
+        // The dedup interval has to be the cadence actually in use. Under adaptive,
+        // `refresh_minutes` is only the fixed interval sitting underneath: an idle machine
+        // batches every 30 minutes, every gap would exceed a 5 minute window, and an
+        // unchanged value would append forever, silently stretching what 288 samples cover
+        // from a day to several.
+        let refresh_secs = {
+            let config = self.config.read().await;
+            crate::scheduler::max_cadence_secs(&config)
+        };
         let mut history = self.history.write().await;
         let mut changed = false;
         for snapshot in snapshots {
@@ -127,12 +184,22 @@ pub struct DisplaySnapshot {
     #[serde(flatten)]
     pub snapshot: UsageSnapshot,
     pub windows: Vec<DisplayWindow>,
+    /// Row 35. Which key in the `get_history` map holds this snapshot's samples: the
+    /// provider id, or `provider:account` once the provider knows its account. The
+    /// frontend must read `history[history_key]`, never `history[provider_id]`, or a
+    /// user with an identified account gets an empty sparkline. Derived in Rust so the
+    /// rule lives in one place instead of being re-spelled in JavaScript.
+    pub history_key: String,
 }
 
 impl From<&UsageSnapshot> for DisplaySnapshot {
     fn from(snapshot: &UsageSnapshot) -> Self {
         Self {
             windows: display_windows(snapshot),
+            history_key: crate::history::series_key(
+                &snapshot.provider_id,
+                snapshot.account_key.as_deref(),
+            ),
             snapshot: snapshot.clone(),
         }
     }
@@ -312,6 +379,58 @@ mod tests {
         // The binding window itself is never capped.
         assert_eq!(windows[1].capped_by, None);
         assert_eq!(windows[1].resets_at, Some(weekly_reset));
+    }
+
+    /// Row 35: the frontend is told where its samples live, so it never has to guess.
+    #[test]
+    fn the_display_snapshot_carries_the_history_key() {
+        let mut s = snapshot([win("5h", 4.0, 300), None, None]);
+        assert_eq!(DisplaySnapshot::from(&s).history_key, "codex");
+        s.account_key = Some("acct-a".into());
+        assert_eq!(
+            DisplaySnapshot::from(&s).history_key,
+            crate::history::series_key("codex", Some("acct-a")),
+            "the wire key is the same hashed series key the file uses"
+        );
+    }
+
+    /// Row 23 scaffolding. The policy is the scheduler's; this is the state it drives.
+    #[test]
+    fn a_skip_holds_until_its_deadline_and_never_shortens() {
+        let state = AppState::new(Config::default());
+        let block_on = |f| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap()
+                .block_on(f)
+        };
+        block_on(async {
+            assert!(!state.is_skipped("codex").await);
+
+            state
+                .skip_provider("codex", Utc::now() + chrono::Duration::minutes(5))
+                .await;
+            assert!(state.is_skipped("codex").await);
+            assert!(!state.is_skipped("claude").await, "one provider only");
+
+            // A shorter deadline must not walk the cooldown backwards.
+            state
+                .skip_provider("codex", Utc::now() + chrono::Duration::seconds(1))
+                .await;
+            assert!(state.skips().await[0].1 > Utc::now() + chrono::Duration::minutes(4));
+
+            // An elapsed deadline is not a skip, and success clears it outright.
+            state
+                .skip_provider("claude", Utc::now() - chrono::Duration::seconds(1))
+                .await;
+            assert!(!state.is_skipped("claude").await);
+            assert_eq!(state.skips().await.len(), 1);
+
+            state.clear_skip("codex").await;
+            assert!(!state.is_skipped("codex").await);
+            assert!(state.skips().await.is_empty());
+        });
     }
 
     /// A window with no duration cannot be compared, so it is left exactly as it came.

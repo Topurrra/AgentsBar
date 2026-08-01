@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::api_token::{api_key, get_json, Auth};
+use super::api_token::{api_key, get_json, has_api_key, Auth};
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot};
 use crate::config::Config;
 
@@ -110,12 +110,16 @@ impl Provider for Deepgram {
         "https://console.deepgram.com"
     }
 
+    fn env_key(&self) -> Option<&'static str> {
+        Some("DEEPGRAM_API_KEY")
+    }
+
     fn is_configured(&self, config: &Config) -> bool {
-        config.api_key(self.id()).is_some()
+        has_api_key(config, self)
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let key = api_key(&ctx.config, self.id())?;
+        let key = api_key(&ctx.config, self)?;
         let header = format!("Token {key}");
         let auth = Auth::Header("Authorization", &header);
 

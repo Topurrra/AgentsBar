@@ -6,6 +6,8 @@
     listBrowsers,
     setCookieSource,
     setCookieHeader,
+    exportDiagnostics,
+    clearCookieCache,
   } from "./api.js";
   import { providerAccent } from "./icons.js";
   import ProviderIcon from "./ProviderIcon.svelte";
@@ -75,6 +77,15 @@
     patch((c) => (c.refresh_minutes = n));
   }
 
+  // Row 24. Adaptive is a scheduler policy, not an interval, so it is a separate flag and
+  // `refresh_minutes` keeps its value underneath: turning Adaptive off returns you to the
+  // interval you had, and an existing config that never saw this switch stays fixed.
+  const adaptive = $derived(!!config?.refresh_adaptive);
+  const setCadence = (e) => {
+    const on = e.currentTarget.value === "adaptive";
+    patch((c) => (c.refresh_adaptive = on));
+  };
+
   function setStartup(e) {
     const on = e.currentTarget.checked;
     patch((c) => (c.launch_at_startup = on));
@@ -97,6 +108,38 @@
   // so they get a source select instead of a toggle.
   async function saveSource(id, source, browser) {
     await setCookieSource(id, source, browser ?? null);
+    onKeySaved();
+  }
+
+  // Row 27. The report is built and redacted in Rust. The clipboard is the whole point
+  // (it ends up pasted into a GitHub issue), and the textarea is the fallback for when
+  // the webview refuses clipboard access, so the user is never stuck with a report they
+  // cannot get out of the app.
+  let report = $state("");
+  let note = $state("");
+
+  async function exportReport() {
+    note = "";
+    report = "";
+    const text = await exportDiagnostics();
+    if (typeof text !== "string" || !text.length) {
+      note = "Could not build the report.";
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      note = "Copied. Paste it into your GitHub issue.";
+    } catch {
+      report = text;
+      note = "Clipboard blocked. Select the report below and copy it.";
+    }
+  }
+
+  async function clearCookies() {
+    report = "";
+    note = (await clearCookieCache())
+      ? "Cleared. The next refresh reads your browser again."
+      : "Could not clear the cookie cache.";
     onKeySaved();
   }
 
@@ -127,19 +170,32 @@
 <div class="scroll">
   <section>
     <div class="row">
-      <label for="ivl">Refresh interval</label>
+      <label for="cadence">Refresh</label>
       <span class="gap"></span>
-      <input
-        id="ivl"
-        type="number"
-        min="1"
-        step="1"
-        class="num"
-        value={config?.refresh_minutes ?? 5}
-        onchange={setInterval_}
-      />
-      <span class="unit">min</span>
+      <select id="cadence" class="cadence" value={adaptive ? "adaptive" : "fixed"} onchange={setCadence}>
+        <option value="adaptive">Adaptive</option>
+        <option value="fixed">Every</option>
+      </select>
+      {#if !adaptive}
+        <input
+          id="ivl"
+          type="number"
+          min="1"
+          step="1"
+          class="num"
+          aria-label="Refresh interval in minutes"
+          value={config?.refresh_minutes ?? 5}
+          onchange={setInterval_}
+        />
+        <span class="unit">min</span>
+      {/if}
     </div>
+    {#if adaptive}
+      <p class="note tight">
+        Checks often just after you open AgentBar and backs off to 30 minutes while you
+        are away, or on battery saver.
+      </p>
+    {/if}
 
     <div class="row">
       <label for="startup">Launch at startup</label>
@@ -165,6 +221,25 @@
         {/each}
       </select>
     </div>
+  </section>
+
+  <div class="secthead">
+    <h2>Support</h2>
+  </div>
+
+  <section>
+    <div class="row">
+      <label for="diag">Diagnostics report</label>
+      <span class="gap"></span>
+      <button id="diag" class="docs" onclick={exportReport}>Copy report</button>
+      <button class="docs" onclick={clearCookies}>Clear cached cookies</button>
+    </div>
+    {#if note}
+      <p class="note tight">{note}</p>
+    {/if}
+    {#if report}
+      <textarea class="report" readonly rows="6" spellcheck="false" value={report}></textarea>
+    {/if}
   </section>
 
   <div class="secthead">
@@ -450,6 +525,26 @@
     font-size: 11px;
     line-height: 1.45;
     color: var(--faint);
+  }
+
+  .note.tight {
+    margin: 0 0 8px;
+  }
+
+  .cadence {
+    max-width: 96px;
+  }
+
+  /* The report is the one place in the app where text is meant to be selected: the whole
+     point is getting it into an issue. */
+  .report {
+    width: 100%;
+    margin: 0 0 8px;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    resize: none;
+    user-select: text;
   }
 
   .hint {

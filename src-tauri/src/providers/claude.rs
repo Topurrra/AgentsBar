@@ -100,7 +100,13 @@ impl Provider for Claude {
         snap.plan = creds.plan();
         // The profile call is decoration: a failure must not lose the usage numbers.
         match fetch_profile(&ctx.http, &creds.access_token).await {
-            Ok(email) => snap.account = email,
+            // Row 35. The email is the only identity this API hands us, so it is both the
+            // display string and the history key. It is not sent anywhere new: `account`
+            // already carried it.
+            Ok(email) => {
+                snap.account_key = email.clone();
+                snap.account = email;
+            }
             Err(e) => log::debug!("claude: profile fetch failed: {e}"),
         }
         Ok(snap)
@@ -182,6 +188,7 @@ impl ClaudeCredentials {
             .map_err(|e| ProviderError::Http(format!("token refresh failed: {e}")))?;
 
         let status = resp.status();
+        let retry_after = super::retry_after_of(&resp);
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
             let code = serde_json::from_str::<Value>(&text)
@@ -198,6 +205,7 @@ impl ClaudeCredentials {
             let msg = format!("Claude token refresh failed with HTTP {}", status.as_u16());
             return Err(match status.as_u16() {
                 400 | 401 | 403 => ProviderError::Auth(msg),
+                429 => ProviderError::RateLimited { retry_after },
                 _ => ProviderError::Http(msg),
             });
         }
@@ -329,6 +337,9 @@ async fn fetch_usage(http: &reqwest::Client, token: &str) -> Result<Value, Provi
         .map_err(|e| ProviderError::Http(e.to_string()))?;
 
     let status = resp.status();
+    // Row 23. Off the response before the body consumes it: a 429 that named its own wait
+    // is the only thing that can shorten or lengthen the backoff honestly.
+    let retry_after = super::retry_after_of(&resp);
     let text = resp.text().await.unwrap_or_default();
     match status.as_u16() {
         200 => serde_json::from_str(&text)
@@ -336,9 +347,9 @@ async fn fetch_usage(http: &reqwest::Client, token: &str) -> Result<Value, Provi
         401 => Err(ProviderError::Auth(
             "Claude OAuth token rejected, run claude login".into(),
         )),
-        429 => Err(ProviderError::Http(
-            "Claude usage endpoint is rate limited, try again in a few minutes".into(),
-        )),
+        // A rate limit, not a generic transport failure: the scheduler honours the header,
+        // the tile prints the rate limited copy, and the retry ladder leaves it alone.
+        429 => Err(ProviderError::RateLimited { retry_after }),
         code => Err(ProviderError::Http(format!("Claude API error {code}"))),
     }
 }
@@ -358,10 +369,9 @@ async fn fetch_profile(
         .map_err(|e| ProviderError::Http(e.to_string()))?;
 
     if !resp.status().is_success() {
-        return Err(ProviderError::Http(format!(
-            "Claude profile error {}",
-            resp.status().as_u16()
-        )));
+        return Err(super::util::http_error(&resp, || {
+            format!("Claude profile error {}", resp.status().as_u16())
+        }));
     }
     let json: Value = resp
         .json()

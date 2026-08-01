@@ -9,7 +9,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::api_token::{api_key, epoch_to_utc, get_json, loose_f64, Auth};
+use super::api_token::{api_key, epoch_to_utc, get_json, has_api_key, loose_f64, Auth};
 use super::util::percent;
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow};
 use crate::config::Config;
@@ -218,13 +218,17 @@ impl Provider for Minimax {
         "https://www.minimax.io/platform"
     }
 
+    fn env_key(&self) -> Option<&'static str> {
+        Some("MINIMAX_API_KEY")
+    }
+
     fn is_configured(&self, config: &Config) -> bool {
-        config.api_key(self.id()).is_some()
+        has_api_key(config, self)
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let key = api_key(&ctx.config, self.id())?;
-        let auth = Auth::Bearer(key);
+        let key = api_key(&ctx.config, self)?;
+        let auth = Auth::Bearer(&key);
         let headers = [("MM-API-Source", "AgentBar")];
         let mut last = ProviderError::NotConfigured;
 

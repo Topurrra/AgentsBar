@@ -352,6 +352,9 @@ async fn fetch_usage(http: &reqwest::Client, auth: &CodexAuth) -> Result<Value, 
         .await
         .map_err(|e| ProviderError::Http(e.to_string()))?;
     let status = resp.status();
+    // Row 23. Off the response before the body consumes it, so a 429 that named its own
+    // wait gets that wait instead of the flat default.
+    let retry_after = super::retry_after_of(&resp);
     let text = resp.text().await.unwrap_or_default();
 
     match status.as_u16() {
@@ -360,6 +363,9 @@ async fn fetch_usage(http: &reqwest::Client, auth: &CodexAuth) -> Result<Value, 
         401 | 403 => Err(ProviderError::Auth(
             "Codex token expired or invalid, run codex login".into(),
         )),
+        // A rate limit, not a generic transport failure: the scheduler honours the header,
+        // the tile prints the rate limited copy, and the retry ladder leaves it alone.
+        429 => Err(ProviderError::RateLimited { retry_after }),
         code => Err(ProviderError::Http(format!("Codex API error {code}"))),
     }
 }
@@ -502,6 +508,10 @@ fn map_usage(body: &Value, auth: &CodexAuth) -> UsageSnapshot {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .or_else(|| auth.plan_from_claims());
+    // Row 35. The account id is already decoded for the `ChatGPT-Account-Id` header, and
+    // it is what changes when the user runs `codex login` into a second account, so
+    // history keys on it instead of appending the new account onto the old series.
+    snap.account_key = auth.account_id();
     // The id_token carries the email, but the usage payload repeats it for API-key logins.
     snap.account = auth.email().or_else(|| {
         body.get("email")

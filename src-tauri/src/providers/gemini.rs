@@ -136,6 +136,9 @@ impl Provider for Gemini {
             "Flash Lite",
             quotas.iter().filter(|q| is_flash_lite(&q.model)),
         );
+        // Row 35. Same as Claude: the id_token email is the only identity available, and
+        // it already travelled in `account`.
+        snap.account_key = claims.email.clone();
         snap.account = claims.email;
         snap.plan = account_plan(
             status.tier.as_deref(),
@@ -339,6 +342,9 @@ async fn retrieve_quota(
         .send()
         .await?;
     let status = response.status();
+    // Row 23. Off the response before the body consumes it, so a 429 that named its own
+    // wait gets that wait instead of the flat default.
+    let retry_after = super::retry_after_of(&response);
     let text = response.text().await?;
     if status == reqwest::StatusCode::UNAUTHORIZED {
         check_consumer_tier(&text)?;
@@ -346,10 +352,14 @@ async fn retrieve_quota(
     }
     if !status.is_success() {
         check_consumer_tier(&text)?;
-        return Err(ProviderError::Http(format!(
-            "Gemini quota request failed with HTTP {}",
-            status.as_u16()
-        )));
+        return Err(if status.as_u16() == 429 {
+            ProviderError::RateLimited { retry_after }
+        } else {
+            ProviderError::Http(format!(
+                "Gemini quota request failed with HTTP {}",
+                status.as_u16()
+            ))
+        });
     }
 
     let parsed: QuotaResponse = serde_json::from_str(&text)

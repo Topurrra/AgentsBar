@@ -90,8 +90,22 @@ pub struct UsageSnapshot {
     pub credits: Option<f64>,
     pub plan: Option<String>,
     pub account: Option<String>,
+    /// Row 35. A stable, non-PII identity for the account these numbers belong to, when
+    /// the provider already knows one (Codex decodes `chatgpt_account_id`). `account` is
+    /// a display string; this is the one history keys on, so that a `codex login` into a
+    /// second account starts a new series instead of appending its 4 percent onto the
+    /// first account's 91 percent and drawing a cliff that never happened.
+    ///
+    /// Identity TAGGING only. Nothing here switches, stores or lists accounts.
+    #[serde(default)]
+    pub account_key: Option<String>,
     pub fetched_at: DateTime<Utc>,
     pub error: Option<String>,
+    /// Row 21. The classified form of `error`, so the UI can tell a transient blip from a
+    /// dead session without pattern matching an English string. Always set and cleared
+    /// together with `error`: use [`Self::set_error`] and [`Self::clear_error`].
+    #[serde(default)]
+    pub error_kind: Option<ProviderErrorKind>,
 }
 
 impl UsageSnapshot {
@@ -104,9 +118,25 @@ impl UsageSnapshot {
             credits: None,
             plan: None,
             account: None,
+            account_key: None,
             fetched_at: Utc::now(),
             error: None,
+            error_kind: None,
         }
+    }
+
+    /// Record a failure. The message is what the tile prints today, the kind is what the
+    /// error copy and the styling switch on, and they must never disagree.
+    pub fn set_error(&mut self, e: &ProviderError) {
+        self.error = Some(e.to_string());
+        self.error_kind = Some(e.kind());
+    }
+
+    /// Clear both halves. A snapshot kept across a failure and then recovered must not
+    /// keep a stale kind behind a cleared message.
+    pub fn clear_error(&mut self) {
+        self.error = None;
+        self.error_kind = None;
     }
 }
 
@@ -129,6 +159,11 @@ pub struct ProviderInfo {
     pub auth: AuthKind,
     pub configured: bool,
     pub doc_url: &'static str,
+    /// Row 38. The environment variable this provider's key can also come from, so the
+    /// error copy can name it. A key resolved from the environment is invisible in
+    /// Settings, and "paste it in Settings" is useless advice when that is where it came
+    /// from. `None` when the provider reads no variable.
+    pub env_key: Option<&'static str>,
 }
 
 pub struct FetchContext {
@@ -251,6 +286,90 @@ pub enum ProviderError {
     Http(String),
     #[error("parse error: {0}")]
     Parse(String),
+    /// Row 23. A 429. `retry_after` is the parsed `Retry-After` header when the provider
+    /// sent one, which is the only number in the whole system that tells us when it is
+    /// polite to come back. `None` means the provider did not say, so the caller applies
+    /// its own default cooldown.
+    #[error("rate limited")]
+    RateLimited {
+        retry_after: Option<std::time::Duration>,
+    },
+}
+
+/// Row 21. The stable, serialized shape of a failure.
+///
+/// The message on the snapshot is for a human; this is what the frontend switches on to
+/// choose wording (row 22) and styling (auth is red and demands action, http is muted and
+/// self-healing), and what the backoff policy switches on to decide whether to wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderErrorKind {
+    NotConfigured,
+    Auth,
+    Http,
+    Parse,
+    RateLimited,
+}
+
+impl ProviderError {
+    pub fn kind(&self) -> ProviderErrorKind {
+        match self {
+            ProviderError::NotConfigured => ProviderErrorKind::NotConfigured,
+            ProviderError::Auth(_) => ProviderErrorKind::Auth,
+            ProviderError::Http(_) => ProviderErrorKind::Http,
+            ProviderError::Parse(_) => ProviderErrorKind::Parse,
+            ProviderError::RateLimited { .. } => ProviderErrorKind::RateLimited,
+        }
+    }
+
+    /// How long the provider asked us to wait, if it asked at all.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            ProviderError::RateLimited { retry_after } => *retry_after,
+            _ => None,
+        }
+    }
+}
+
+/// A `Retry-After` header value is server controlled, so it is clamped. An hour is longer
+/// than any cadence we run and short enough that a hostile or broken header cannot park a
+/// provider for a day.
+pub const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Parse a `Retry-After` header: delta-seconds, or an HTTP-date. Clamped to
+/// [`MAX_RETRY_AFTER`], and `None` for anything that would not make us wait at all, so a
+/// `Retry-After: 0` falls back to the caller's own cooldown rather than to no cooldown.
+pub fn parse_retry_after(value: &str) -> Option<std::time::Duration> {
+    retry_after_at(value, Utc::now())
+}
+
+/// The `Retry-After` a response asked for, if it asked at all.
+///
+/// Every 429 in the app goes through here, so a provider cannot accidentally become the one
+/// that ignores the only number telling us when it is polite to come back. Must be called
+/// before the body is consumed, since that takes the response by value.
+pub fn retry_after_of(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after)
+}
+
+/// [`parse_retry_after`] against an explicit clock, so the HTTP-date case is testable.
+pub fn retry_after_at(value: &str, now: DateTime<Utc>) -> Option<std::time::Duration> {
+    let value = value.trim();
+    let secs = match value.parse::<i64>() {
+        Ok(secs) => secs,
+        // RFC 9110 allows an IMF-fixdate, "Wed, 21 Oct 2015 07:28:00 GMT". chrono's RFC
+        // 2822 parser accepts that spelling including the obsolete GMT zone.
+        Err(_) => {
+            let at = DateTime::parse_from_rfc2822(value)
+                .ok()?
+                .with_timezone(&Utc);
+            (at - now).num_seconds()
+        }
+    };
+    (secs > 0).then(|| std::time::Duration::from_secs(secs as u64).min(MAX_RETRY_AFTER))
 }
 
 impl From<reqwest::Error> for ProviderError {
@@ -274,6 +393,14 @@ pub trait Provider: Send + Sync {
     fn auth_kind(&self) -> AuthKind;
     fn doc_url(&self) -> &'static str {
         ""
+    }
+    /// Row 38. The conventional environment variable holding this provider's key, for
+    /// example `OPENROUTER_API_KEY`. `api_token::api_key` consults the config first and
+    /// falls back to this, so the override is one uniform rule instead of ad hoc handling
+    /// in a handful of providers. `None` when the provider has no conventional variable:
+    /// do not invent one, take it from the provider's own documentation.
+    fn env_key(&self) -> Option<&'static str> {
+        None
     }
     fn is_configured(&self, config: &crate::config::Config) -> bool;
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError>;
@@ -380,6 +507,89 @@ mod tests {
         assert!(json.contains("\"used_percent\":null"), "{json}");
         let json = serde_json::to_string(&win(Some(0.0))).unwrap();
         assert!(json.contains("\"used_percent\":0.0"), "{json}");
+    }
+
+    // ------------------------------------------------------ row 21, error taxonomy
+
+    #[test]
+    fn every_error_has_a_kind_and_only_rate_limits_carry_a_delay() {
+        let cases = [
+            (
+                ProviderError::NotConfigured,
+                ProviderErrorKind::NotConfigured,
+            ),
+            (ProviderError::Auth("401".into()), ProviderErrorKind::Auth),
+            (ProviderError::Http("502".into()), ProviderErrorKind::Http),
+            (ProviderError::Parse("bad".into()), ProviderErrorKind::Parse),
+        ];
+        for (e, kind) in cases {
+            assert_eq!(e.kind(), kind);
+            assert_eq!(e.retry_after(), None);
+        }
+        let limited = ProviderError::RateLimited {
+            retry_after: Some(std::time::Duration::from_secs(30)),
+        };
+        assert_eq!(limited.kind(), ProviderErrorKind::RateLimited);
+        assert_eq!(limited.retry_after().map(|d| d.as_secs()), Some(30));
+    }
+
+    /// The frontend contract: the kind travels next to the message, in snake_case.
+    #[test]
+    fn the_kind_serializes_next_to_the_message() {
+        let mut s = UsageSnapshot::new("codex");
+        s.set_error(&ProviderError::RateLimited { retry_after: None });
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"error\":\"rate limited\""), "{json}");
+        assert!(json.contains("\"error_kind\":\"rate_limited\""), "{json}");
+
+        s.clear_error();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"error_kind\":null"), "{json}");
+    }
+
+    /// A snapshot written by wave 3 has neither field.
+    #[test]
+    fn a_snapshot_without_the_new_fields_still_deserializes() {
+        let json = r#"{"provider_id":"codex","primary":null,"secondary":null,
+            "tertiary":null,"credits":null,"plan":null,"account":null,
+            "fetched_at":"2026-01-01T00:00:00Z","error":null}"#;
+        let s: UsageSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(s.error_kind, None);
+        assert_eq!(s.account_key, None);
+    }
+
+    #[test]
+    fn retry_after_reads_seconds_and_http_dates() {
+        let now = now();
+        assert_eq!(retry_after_at(" 30 ", now).map(|d| d.as_secs()), Some(30));
+        // An HTTP-date, which is what half the providers send.
+        let at = (now + chrono::Duration::seconds(90)).to_rfc2822();
+        assert_eq!(retry_after_at(&at, now).map(|d| d.as_secs()), Some(90));
+        assert_eq!(
+            retry_after_at("Wed, 21 Oct 2015 07:28:00 GMT", now).map(|d| d.as_secs()),
+            None,
+            "a date already in the past is not a wait"
+        );
+        // Nothing that would not make us wait: the caller falls back to its own default.
+        assert_eq!(retry_after_at("0", now), None);
+        assert_eq!(retry_after_at("-5", now), None);
+        assert_eq!(retry_after_at("soon", now), None);
+        assert_eq!(retry_after_at("", now), None);
+        // Server controlled, so it is clamped.
+        assert_eq!(retry_after_at("999999", now), Some(MAX_RETRY_AFTER));
+    }
+
+    /// Row 38 is opt in, and an empty name would silently read the whole environment as
+    /// "no override" while looking configured.
+    #[test]
+    fn a_declared_env_key_is_never_blank() {
+        for p in all_providers() {
+            assert!(
+                p.env_key().is_none_or(|k| !k.trim().is_empty()),
+                "{} declares a blank env_key",
+                p.id()
+            );
+        }
     }
 
     // ---------------------------------------------------------- row 8, the walk

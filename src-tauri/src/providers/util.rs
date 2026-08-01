@@ -45,6 +45,26 @@ pub fn remaining_percent(used_percent: f64) -> f64 {
     (100.0 - used_percent).clamp(0.0, 100.0)
 }
 
+/// The error for a response that came back with a status we cannot use.
+///
+/// Row 23. A 429 is a rate limit at every endpoint, not a generic transport failure, so it
+/// is classified as one and carries whatever `Retry-After` the server sent. That is what
+/// makes the scheduler wait the length it was asked for instead of a flat five minutes,
+/// makes the tile print the rate limited copy instead of "could not reach", and keeps the
+/// retry ladder (which exists for "the network is down") from dragging every other provider
+/// onto a 15 second cadence to be told 429 faster. Anything else keeps the caller's own
+/// message, which is the one that names the endpoint.
+///
+/// Must be called before the body is consumed: reading it takes the response by value.
+pub fn http_error(resp: &reqwest::Response, message: impl FnOnce() -> String) -> ProviderError {
+    match resp.status().as_u16() {
+        429 => ProviderError::RateLimited {
+            retry_after: super::retry_after_of(resp),
+        },
+        _ => ProviderError::Http(message()),
+    }
+}
+
 /// True when a URL is a sign-in page or an identity provider's host: a `login`, `signin`
 /// or `sign-in` path segment, or a host under `auth.`, WorkOS, Auth0, Okta or Clerk.
 ///
@@ -107,6 +127,39 @@ mod tests {
             "https://api.cursor.com/dashboard/get-usage",
         ] {
             assert!(!is_login_url(url), "{url}");
+        }
+    }
+
+    /// Row 23. Every endpoint in the app must classify a 429 as a rate limit, or the
+    /// scheduler waits a flat five minutes instead of the length the server asked for and
+    /// the tile prints "could not reach" over a provider that answered in detail.
+    #[test]
+    fn a_429_is_a_rate_limit_everywhere_and_carries_the_servers_own_wait() {
+        let response = |status: u16, retry_after: Option<&str>| {
+            let mut b = http::Response::builder().status(status);
+            if let Some(v) = retry_after {
+                b = b.header("retry-after", v);
+            }
+            reqwest::Response::from(b.body(Vec::new()).unwrap())
+        };
+        let boom = || "endpoint said no".to_string();
+
+        let limited = http_error(&response(429, Some("90")), boom);
+        assert!(matches!(limited, ProviderError::RateLimited { .. }));
+        assert_eq!(limited.retry_after().map(|d| d.as_secs()), Some(90));
+
+        // No header: still a rate limit, and the caller applies its own cooldown.
+        let bare = http_error(&response(429, None), boom);
+        assert!(matches!(bare, ProviderError::RateLimited { .. }));
+        assert_eq!(bare.retry_after(), None);
+
+        // Everything else keeps the caller's message, which names the endpoint.
+        for status in [500, 503, 404, 302] {
+            let other = http_error(&response(status, None), boom);
+            assert!(
+                matches!(&other, ProviderError::Http(m) if m == "endpoint said no"),
+                "{status}: {other:?}"
+            );
         }
     }
 

@@ -43,8 +43,9 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         autostart_on,
         None::<&str>,
     )?;
+    let updates = MenuItem::with_id(app, "updates", "Check for updates", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&refresh, &settings, &startup, &quit])?;
+    let menu = Menu::with_items(app, &[&refresh, &settings, &startup, &updates, &quit])?;
     let _ = STARTUP_ITEM.set(startup);
 
     TrayIconBuilder::with_id(TRAY_ID)
@@ -81,6 +82,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                     apply_autostart(&app, checked);
                 });
             }
+            "updates" => crate::updater::check_now(app),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -277,7 +279,10 @@ fn is_stale(snapshot: &UsageSnapshot, config: &Config) -> bool {
     if snapshot.error.is_some() {
         return true;
     }
-    let limit = config.refresh_minutes.max(1).saturating_mul(60 * 3) as i64;
+    // Three cadences of the policy actually in use, not three `refresh_minutes`: under
+    // adaptive an idle machine batches every 30 minutes and the fixed number is only the
+    // interval the user returns to.
+    let limit = crate::scheduler::max_cadence_secs(config).saturating_mul(3);
     (chrono::Utc::now() - snapshot.fetched_at).num_seconds() > limit
 }
 
@@ -594,12 +599,23 @@ mod tests {
 
     #[test]
     fn a_stale_or_errored_snapshot_dims_the_glyph() {
-        let cfg = Config::default();
+        // A fixed interval, so the threshold is three of the user's own five minutes.
+        let mut cfg = Config {
+            refresh_adaptive: false,
+            ..Config::default()
+        };
         let mut s = snap("codex", 10.0);
         assert!(!is_stale(&s, &cfg));
 
         s.fetched_at = chrono::Utc::now() - chrono::Duration::minutes(16);
         assert!(is_stale(&s, &cfg), "older than 3 x 5 minute intervals");
+
+        // Row 24: under adaptive an idle machine batches every 30 minutes, so 16 minutes
+        // old is current and dimming the glyph for it would be a permanent lie.
+        cfg.refresh_adaptive = true;
+        assert!(!is_stale(&s, &cfg), "adaptive idles at 30 minute batches");
+        s.fetched_at = chrono::Utc::now() - chrono::Duration::minutes(91);
+        assert!(is_stale(&s, &cfg));
 
         let mut errored = snap("codex", 10.0);
         errored.error = Some("http error: 502".into());

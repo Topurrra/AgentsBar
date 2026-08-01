@@ -6,6 +6,7 @@ pub mod providers;
 pub mod scheduler;
 pub mod state;
 pub mod tray;
+pub mod updater;
 
 mod redact;
 
@@ -25,6 +26,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -51,6 +53,9 @@ pub fn run() {
             app.manage(state::AppState::new(config::Config::load()));
             tray::setup(app.handle())?;
             scheduler::start(app.handle().clone());
+            // Silent unless there is something to install, and it still asks before
+            // installing it. Row 29.
+            updater::check_on_startup(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -59,6 +64,7 @@ pub fn run() {
             commands::refresh_all,
             commands::refresh_provider,
             commands::get_config,
+            commands::get_cadence_secs,
             commands::set_config,
             commands::set_api_key,
             commands::quit_app,
@@ -66,6 +72,8 @@ pub fn run() {
             commands::set_cookie_source,
             commands::set_cookie_header,
             commands::get_history,
+            commands::export_diagnostics,
+            commands::clear_cookie_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AgentBar");

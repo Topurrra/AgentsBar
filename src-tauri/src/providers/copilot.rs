@@ -109,10 +109,9 @@ impl Provider for Copilot {
             ));
         }
         if !status.is_success() {
-            return Err(ProviderError::Http(format!(
-                "Copilot usage request failed with HTTP {}",
-                status.as_u16()
-            )));
+            return Err(super::util::http_error(&response, || {
+                format!("Copilot usage request failed with HTTP {}", status.as_u16())
+            }));
         }
 
         let body: UsageResponse = response

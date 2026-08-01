@@ -1,8 +1,10 @@
 //! Usage history for the popover sparklines.
 //!
-//! One ring buffer per provider id, 288 samples (24 hours at the default 5 minute
-//! refresh), persisted to `%APPDATA%\AgentBar\history.json` with the same atomic
-//! temp-plus-rename discipline as config.rs.
+//! One ring buffer per series, 288 samples (24 hours at the default 5 minute refresh),
+//! persisted to `%APPDATA%\AgentBar\history.json` with the same atomic temp-plus-rename
+//! discipline as config.rs.
+//!
+//! A series is a provider AND an account (row 35, see [`series_key`]), not a provider.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,6 +18,49 @@ use crate::providers::UsageSnapshot;
 /// file stays under 250 kB in the worst case, every provider configured and every series
 /// full. A real install has a handful of providers and a fraction of that.
 pub const MAX_SAMPLES: usize = 288;
+
+/// Series kept per provider: the account in use plus one previous, so switching back and
+/// forth between two accounts keeps both charts. History is a nicety, and an unbounded set
+/// of account keys (a provider whose key turns out not to be stable) must not be able to
+/// grow `history.json` without a ceiling.
+pub const MAX_SERIES_PER_PROVIDER: usize = 2;
+
+/// Row 35. The map key a snapshot's samples belong under: the provider id alone when the
+/// provider does not know its account, `provider:account` when it does.
+///
+/// Two accounts under one key is how a `codex login` into a second account appends its 4
+/// percent onto the first account's 91 percent and draws a cliff that never happened.
+/// Splitting the key means the new account simply starts an empty series.
+///
+/// A snapshot with no `account_key` keeps the bare provider id, which is also what every
+/// `history.json` written before this existed uses, so old files keep their series.
+///
+/// The account half is HASHED, not written through. Claude and Gemini have no stable
+/// identity other than the profile email, so `account_key` holds one, and this key is
+/// written to `history.json` on disk and travels to the frontend as `history_key`. All
+/// either side needs is "same account or not", which a digest answers, so an email never
+/// reaches disk in the clear. Truncated to 16 hex characters: the whole point is telling
+/// one of a person's two accounts from the other, and 64 bits is not close to that limit.
+pub fn series_key(provider_id: &str, account_key: Option<&str>) -> String {
+    match account_key.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(account) => {
+            use sha2::Digest;
+            let digest = sha2::Sha256::digest(account.as_bytes());
+            let mut hex = String::with_capacity(16);
+            for byte in &digest[..8] {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            format!("{provider_id}:{hex}")
+        }
+        None => provider_id.to_string(),
+    }
+}
+
+/// The provider id half of a [`series_key`]. Provider ids never contain a colon, so the
+/// first one is the boundary however the account half is spelled.
+fn provider_of(key: &str) -> &str {
+    key.split_once(':').map_or(key, |(id, _)| id)
+}
 
 /// Short field names on purpose: this file is written every refresh.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,7 +139,8 @@ impl History {
             u: used,
             l: Some(lane),
         };
-        let series = self.series.entry(snapshot.provider_id.clone()).or_default();
+        let key = series_key(&snapshot.provider_id, snapshot.account_key.as_deref());
+        let series = self.series.entry(key).or_default();
         // A backwards clock step (NTP correction, resume from sleep) must not push the
         // series out of order: the sparkline maps x from the first and last timestamps and
         // would draw outside its own viewBox. The sample keeps the newest known time.
@@ -121,7 +167,29 @@ impl History {
         if series.len() > MAX_SAMPLES {
             series.drain(..series.len() - MAX_SAMPLES);
         }
+        // Cheap enough to run every sample (the map holds a few dozen keys) and it has to
+        // run here, not only in `prune`, because a process that never restarts would
+        // otherwise accumulate a series per account key seen.
+        self.cap_accounts(&snapshot.provider_id);
         true
+    }
+
+    /// Keep only the [`MAX_SERIES_PER_PROVIDER`] most recently written series for one
+    /// provider, dropping the accounts whose last sample is oldest.
+    fn cap_accounts(&mut self, provider_id: &str) {
+        let mut keys: Vec<(i64, String)> = self
+            .series
+            .iter()
+            .filter(|(key, _)| provider_of(key) == provider_id)
+            .map(|(key, samples)| (samples.last().map_or(0, |s| s.t), key.clone()))
+            .collect();
+        if keys.len() <= MAX_SERIES_PER_PROVIDER {
+            return;
+        }
+        keys.sort_unstable();
+        for (_, key) in &keys[..keys.len() - MAX_SERIES_PER_PROVIDER] {
+            self.series.remove(key);
+        }
     }
 
     /// Drop providers that are no longer in the registry and trim over-long series.
@@ -130,8 +198,8 @@ impl History {
             .iter()
             .map(|p| p.id())
             .collect();
-        self.series.retain(|id, series| {
-            if !known.contains(&id.as_str()) {
+        self.series.retain(|key, series| {
+            if !known.contains(&provider_of(key)) {
                 return false;
             }
             series.retain(|s| s.t > 0 && s.u.is_finite());
@@ -146,6 +214,11 @@ impl History {
             }
             !series.is_empty()
         });
+        // A hand edited or long lived file can hold more accounts per provider than we
+        // keep. Same ceiling on load as on write.
+        for id in known {
+            self.cap_accounts(id);
+        }
     }
 
     /// Atomic write: temp file next to the target, then rename over it.
@@ -231,6 +304,120 @@ mod tests {
     fn a_sample_without_a_lane_label_still_parses() {
         let h = History::parse(r#"{"codex":[{"t":1,"u":5.0}]}"#);
         assert_eq!(h.series()["codex"][0].l, None);
+    }
+
+    // -------------------------------------------------- row 35, account identity
+
+    fn for_account(id: &str, account: &str, used: f64) -> UsageSnapshot {
+        let mut s = snapshot(id, used);
+        s.account_key = Some(account.to_string());
+        s
+    }
+
+    #[test]
+    fn a_snapshot_with_no_account_keeps_the_bare_provider_id() {
+        assert_eq!(series_key("codex", None), "codex");
+        assert_eq!(series_key("codex", Some("  ")), "codex");
+        assert_eq!(
+            series_key("codex", Some(" acct-a ")),
+            series_key("codex", Some("acct-a")),
+            "the key is trimmed before it is hashed"
+        );
+
+        let mut h = History::default();
+        assert!(h.record(&snapshot("codex", 12.0), 300));
+        assert!(h.series().contains_key("codex"));
+    }
+
+    /// Row 35, the headline: a second `codex login` must not append its 4 percent onto the
+    /// first account's 91 percent. The old series stays exactly as it was and the new
+    /// account starts its own.
+    #[test]
+    fn a_new_account_starts_a_new_series_instead_of_drawing_a_cliff() {
+        let mut h = History::default();
+        assert!(h.record(&for_account("codex", "acct-a", 91.0), 300));
+        assert!(h.record(&for_account("codex", "acct-b", 4.0), 300));
+
+        let a = series_key("codex", Some("acct-a"));
+        let b = series_key("codex", Some("acct-b"));
+        assert_eq!(h.series()[&a].len(), 1);
+        assert_eq!(h.series()[&a][0].u, 91.0);
+        assert_eq!(h.series()[&b].len(), 1);
+        assert_eq!(h.series()[&b][0].u, 4.0);
+
+        // Switching back continues the first account rather than restarting it.
+        assert!(h.record(&for_account("codex", "acct-a", 93.0), 300));
+        assert_eq!(h.series()[&a].len(), 2);
+    }
+
+    /// Row 35. Claude and Gemini have no stable identity other than the profile email, so
+    /// `account_key` holds one. It must not reach `history.json` or the frontend in the
+    /// clear, and the hash must still tell two accounts apart.
+    #[test]
+    fn an_account_key_is_hashed_and_never_written_through() {
+        let email = "sam@example.com";
+        let key = series_key("claude", Some(email));
+        assert!(
+            !key.contains(email),
+            "an email must not reach disk in clear"
+        );
+        assert!(!key.contains('@'));
+        assert_eq!(key.len(), "claude:".len() + 16);
+        assert!(key["claude:".len()..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(key, series_key("claude", Some("other@example.com")));
+        assert_eq!(
+            key,
+            series_key("claude", Some(email)),
+            "stable across calls"
+        );
+    }
+
+    /// Two providers with the same account key are still two series.
+    #[test]
+    fn the_provider_half_of_the_key_still_separates_providers() {
+        let mut h = History::default();
+        assert!(h.record(&for_account("codex", "same", 10.0), 300));
+        assert!(h.record(&for_account("claude", "same", 20.0), 300));
+        assert_eq!(h.series().len(), 2);
+        assert_eq!(h.series()[&series_key("claude", Some("same"))][0].u, 20.0);
+    }
+
+    /// An unstable account key must not grow the file without a ceiling: the provider
+    /// keeps the account in use plus one previous.
+    #[test]
+    fn accounts_per_provider_are_capped_oldest_first() {
+        let mut h = History::default();
+        for account in ["a", "b", "c"] {
+            assert!(h.record(&for_account("codex", account, 5.0), 300));
+            // Distinct last-sample times, so "oldest" is unambiguous.
+            h.series
+                .get_mut(&series_key("codex", Some(account)))
+                .unwrap()[0]
+                .t -= match account {
+                "a" => 200,
+                "b" => 100,
+                _ => 0,
+            };
+        }
+        assert_eq!(h.series().len(), MAX_SERIES_PER_PROVIDER);
+        assert!(
+            !h.series().contains_key(&series_key("codex", Some("a"))),
+            "the oldest account stayed"
+        );
+        assert!(h.series().contains_key(&series_key("codex", Some("c"))));
+    }
+
+    /// A composite key survives a load, and an unknown provider is still dropped by its
+    /// provider half.
+    #[test]
+    fn pruning_reads_the_provider_out_of_a_composite_key() {
+        let h = History::parse(
+            r#"{"codex:acct-a":[{"t":100,"u":5.0}],"gone:acct-a":[{"t":100,"u":5.0}]}"#,
+        );
+        assert_eq!(h.series()["codex:acct-a"].len(), 1);
+        assert!(!h.series().contains_key("gone:acct-a"));
     }
 
     #[test]

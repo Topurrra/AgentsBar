@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 
 use super::api_token::TIMEOUT;
-use super::util::{is_login_url, percent, redirect_target};
+use super::util::{http_error, is_login_url, percent, redirect_target};
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow, Want};
 use crate::config::Config;
 
@@ -96,10 +96,9 @@ impl Provider for Amp {
                     return Err(expired());
                 }
                 if !status.is_success() {
-                    return Err(ProviderError::Http(format!(
-                        "Amp settings page returned HTTP {}",
-                        status.as_u16()
-                    )));
+                    return Err(http_error(&response, || {
+                        format!("Amp settings page returned HTTP {}", status.as_u16())
+                    }));
                 }
 
                 let html = response

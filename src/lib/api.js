@@ -31,3 +31,18 @@ export const setCookieSource = (id, source, browser) =>
 
 // header is a secret: pass it straight through, never keep it in component state.
 export const setCookieHeader = (id, header) => call("set_cookie_header", { id, header });
+
+// Wave 4 support commands. `export_diagnostics` returns a report that is already free of
+// keys, cookies and emails on the Rust side, so the UI never has to redact anything.
+export const exportDiagnostics = () => call("export_diagnostics");
+// Returns nothing on success, so `call`'s null-on-failure convention cannot be read
+// here: this one reports the boolean instead.
+export const clearCookieCache = async () => {
+  try {
+    await invoke("clear_cookie_cache");
+    return true;
+  } catch (e) {
+    console.error("clear_cookie_cache", e);
+    return false;
+  }
+};

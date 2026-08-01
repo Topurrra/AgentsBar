@@ -7,6 +7,7 @@
     providers,
     snapshots,
     history = {},
+    config = null,
     now,
     ready,
     refreshing,
@@ -33,10 +34,14 @@
   {#if providers.length}
     <div class="tiles">
       {#each tiles as p (p.id)}
+        <!-- Row 35: history is keyed by SERIES (`provider:account`), not by provider id.
+             The key is computed in Rust and travels on the snapshot, so the rule is not
+             re-spelled here. The fallback covers the tick before the first snapshot. -->
         <ProviderTile
           provider={p}
           snapshot={byId.get(p.id)}
-          samples={history[p.id] ?? []}
+          samples={history[byId.get(p.id)?.history_key ?? p.id] ?? []}
+          cookieSource={config?.providers?.[p.id]?.cookie_source ?? null}
           {now}
           {staleMs}
           {onRetry}

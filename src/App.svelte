@@ -9,6 +9,7 @@
   let snapshots = $state([]);
   let history = $state({});
   let config = $state(null);
+  let cadenceSecs = $state(null);
   let view = $state("usage");
   let now = $state(Date.now());
   let refreshing = $state(false);
@@ -19,12 +20,23 @@
 
   // Row 20: a tile is stale once it is older than two refresh intervals. One missed
   // cycle is normal; two means the number on screen is not what the tile implies.
-  const staleMs = $derived((config?.refresh_minutes ?? 5) * 2 * 60000);
+  //
+  // The interval comes from the backend, not from `refresh_minutes`: under the adaptive
+  // cadence (the default for fresh installs) that field is only the fixed interval sitting
+  // underneath, and an idle machine batches every 30 minutes. Sizing this from 5 minutes
+  // would stamp "29m ago" on every tile while the data is exactly as current as the policy
+  // in use intends. `tray::is_stale` reads the same number.
+  const staleMs = $derived((cadenceSecs ?? 300) * 2 * 1000);
 
   async function loadConfig() {
-    const [cfg, list] = await Promise.all([call("get_config"), call("list_providers")]);
+    const [cfg, list, cadence] = await Promise.all([
+      call("get_config"),
+      call("list_providers"),
+      call("get_cadence_secs"),
+    ]);
     if (cfg) config = cfg;
     if (list) providers = list;
+    if (typeof cadence === "number") cadenceSecs = cadence;
   }
 
   async function loadSnapshots() {
@@ -42,9 +54,9 @@
   async function saveConfig(next) {
     config = next;
     await call("set_config", { config: next });
-    // The backend recomputes which providers count as configured.
-    const list = await call("list_providers");
-    if (list) providers = list;
+    // The backend recomputes which providers count as configured, and switching between
+    // adaptive and a fixed interval changes what counts as stale.
+    await loadConfig();
   }
 
   async function refreshAll() {
@@ -119,6 +131,7 @@
       providers={enabled}
       {snapshots}
       {history}
+      {config}
       {now}
       {refreshing}
       {staleMs}

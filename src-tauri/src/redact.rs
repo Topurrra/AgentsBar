@@ -7,8 +7,9 @@
 //! Ported from CodexBar's `Sources/CodexBarCore/Logging/LogRedactor.swift`, including its
 //! cheap substring prefilter: a normal log line never reaches the scanning path.
 //!
-//! ponytail: hand written matching instead of the `regex` crate. Five fixed shapes do not
-//! justify a new dependency (and 1.5 MB of binary) in a 4.6 MB app.
+//! ponytail: hand written matching instead of the `regex` crate. A handful of fixed shapes
+//! plus one length rule do not justify a new dependency (and 1.5 MB of binary) in a 6 MB
+//! app.
 
 use std::borrow::Cow;
 
@@ -42,6 +43,37 @@ fn may_contain_secret(text: &str) -> bool {
         || ["sk-", "gh", "bearer", "cookie", "authorization"]
             .iter()
             .any(|needle| contains_ignore_case(text, needle))
+        || has_long_token(text)
+}
+
+/// The shortest run of token characters treated as opaque credential material. Long enough
+/// that no English word, HTTP status, percentage or duration in this app reaches it, short
+/// enough to catch a session value a provider echoed back at us.
+const MIN_TOKEN_LEN: usize = 16;
+
+fn is_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
+/// Whether the text holds a run of at least [`MIN_TOKEN_LEN`] token bytes carrying both a
+/// digit and a letter. The prefilter half of [`is_opaque_token`], and deliberately a
+/// superset of it: a `.` or a `:` ends a run, which is what keeps timestamps, versions and
+/// file paths out of the scanning path.
+fn has_long_token(text: &str) -> bool {
+    let (mut len, mut digit, mut alpha) = (0usize, false, false);
+    for b in text.bytes() {
+        if !is_token_byte(b) {
+            (len, digit, alpha) = (0, false, false);
+            continue;
+        }
+        len += 1;
+        digit |= b.is_ascii_digit();
+        alpha |= b.is_ascii_alphabetic();
+        if len >= MIN_TOKEN_LEN && digit && alpha {
+            return true;
+        }
+    }
+    false
 }
 
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
@@ -143,7 +175,21 @@ fn is_secret(core: &str) -> bool {
     {
         return true;
     }
-    is_email(core)
+    is_opaque_token(core) || is_email(core)
+}
+
+/// The shape-agnostic net: a long opaque token whatever the vendor prefixes it with.
+///
+/// The named shapes above only catch the credentials we happened to think of, and the
+/// value in `WorkosCursorSessionToken=<value>` matches none of them. The requirements are
+/// deliberately conservative, because this runs over every log line: token bytes only (so a
+/// timestamp, a version, a percentage or a path is out), at least [`MIN_TOKEN_LEN`] of
+/// them, and both a digit and a letter (so an English phrase and a bare number are out).
+fn is_opaque_token(core: &str) -> bool {
+    core.len() >= MIN_TOKEN_LEN
+        && core.bytes().all(is_token_byte)
+        && core.bytes().any(|b| b.is_ascii_digit())
+        && core.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
 /// Deliberately loose: `a@b.c`. A log line is not a signup form, and over-redacting a
@@ -190,6 +236,47 @@ mod tests {
         ];
         for (input, want) in cases {
             assert_eq!(redact(input), want, "input: {input}");
+        }
+    }
+
+    /// The shape-agnostic rule: a credential nobody wrote a rule for still does not survive.
+    /// Every value here is synthetic.
+    #[test]
+    fn an_unrecognised_token_shape_is_redacted_on_its_shape_alone() {
+        let cases = [
+            (
+                "HTTP 401 (WorkosCursorSessionToken=FAKECOOKIEVALUE9999 rejected)",
+                "HTTP 401 (WorkosCursorSessionToken=<redacted> rejected)",
+            ),
+            // No `=`, no known prefix, no header name: the word alone.
+            (
+                "rejected FAKESESSIONVALUE00001",
+                "rejected <redacted>",
+            ),
+            // A UUID-shaped session id.
+            (
+                "session 3f7a1c2e-9b04-4d6a-8f21-77c0de11ab99 expired",
+                "session <redacted> expired",
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(redact(input), want, "input: {input}");
+        }
+    }
+
+    /// The rule is conservative on purpose: it must not eat the values a support report is
+    /// made of. Timestamps, versions, builds and counts all survive.
+    #[test]
+    fn ordinary_identifiers_are_not_mistaken_for_tokens() {
+        for line in [
+            "generated:   2026-08-01T12:34:56.789012300+00:00",
+            "windows:     Windows 10 10.0.19045",
+            "webview2:    141.0.3537.85",
+            "  openrouter  ApiKey     enabled=yes configured=yes key=no",
+            "history: 300 sample(s) across 2 series",
+            "refresh:     adaptive (fixed setting is 5 min)",
+        ] {
+            assert_eq!(redact(line), line);
         }
     }
 

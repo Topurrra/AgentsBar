@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::api_token::{api_key, epoch_to_utc, get_json, Auth};
+use super::api_token::{api_key, epoch_to_utc, get_json, has_api_key, Auth};
 use super::util::percent;
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow};
 use crate::config::Config;
@@ -115,16 +115,20 @@ impl Provider for ElevenLabs {
         "https://elevenlabs.io/app/settings/api-keys"
     }
 
+    fn env_key(&self) -> Option<&'static str> {
+        Some("ELEVENLABS_API_KEY")
+    }
+
     fn is_configured(&self, config: &Config) -> bool {
-        config.api_key(self.id()).is_some()
+        has_api_key(config, self)
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let key = api_key(&ctx.config, self.id())?;
+        let key = api_key(&ctx.config, self)?;
         let sub: Subscription = get_json(
             &ctx.http,
             SUBSCRIPTION_URL,
-            &Auth::Header("xi-api-key", key),
+            &Auth::Header("xi-api-key", &key),
             &[],
         )
         .await?;

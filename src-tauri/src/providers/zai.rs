@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::api_token::{api_key, epoch_to_utc, get_json, Auth};
+use super::api_token::{api_key, epoch_to_utc, get_json, has_api_key, Auth};
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow};
 use crate::config::Config;
 
@@ -194,14 +194,18 @@ impl Provider for Zai {
         "https://docs.z.ai"
     }
 
+    fn env_key(&self) -> Option<&'static str> {
+        Some("Z_AI_API_KEY")
+    }
+
     fn is_configured(&self, config: &Config) -> bool {
-        config.api_key(self.id()).is_some()
+        has_api_key(config, self)
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let key = api_key(&ctx.config, self.id())?;
+        let key = api_key(&ctx.config, self)?;
         let response: QuotaResponse =
-            get_json(&ctx.http, &quota_url(), &Auth::Bearer(key), &[]).await?;
+            get_json(&ctx.http, &quota_url(), &Auth::Bearer(&key), &[]).await?;
         to_snapshot(response)
     }
 }

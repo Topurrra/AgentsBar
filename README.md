@@ -9,8 +9,8 @@ Peter Steinberger (MIT).
 
 Built with Rust, Tauri 2, and Svelte 5. Fast and lightweight by design:
 
-- 4.6 MB executable, no bundled browser (uses the Windows WebView2 runtime)
-- ~27 MB memory while running, 0% CPU when idle
+- 6.25 MB executable, no bundled browser (uses the Windows WebView2 runtime)
+- ~30 MB memory while running, 0% CPU when idle
 - No accounts, no telemetry, no passwords stored. AgentBar reuses the sessions your
   CLIs and browser already have, or API keys you provide.
 
@@ -25,8 +25,10 @@ Built with Rust, Tauri 2, and Svelte 5. Fast and lightweight by design:
   sorted by urgency, so whatever is closest to running out is at the top
 - Real provider logos on every tile, and a sparkline per provider showing how the last
   few hours of usage moved
-- Right-click menu: refresh now, settings, launch at startup, quit
-- Settings for refresh interval, pinned provider, enabling providers, API keys, and the
+- A pace line under every bar: whether you are ahead or behind for the window, and
+  whether what is left lasts to the reset
+- Right-click menu: refresh now, settings, launch at startup, check for updates, quit
+- Settings for refresh cadence, pinned provider, enabling providers, API keys, and the
   browser each cookie based provider reads from
 - Automatic OAuth token refresh for Codex, Claude, and Gemini, merged back into the
   CLI credential files exactly like the CLIs do
@@ -98,9 +100,11 @@ Anything a killed run left behind is swept at the next start.
 
 **Secrets never leave your machine except to the provider they authenticate.** API keys,
 tokens, and imported cookies go to the provider's own HTTPS endpoint and nowhere else.
-There is no AgentBar server, no analytics, no crash reporting, no update ping. The shared
-HTTP client refuses to follow a redirect that leaves the original HTTPS origin, so a
-credentialed request cannot be steered somewhere else.
+There is no AgentBar server, no analytics and no crash reporting. AgentBar does check
+GitHub for a new release when it starts and when you ask it to; that request carries
+nothing about you, and no update is ever installed without asking. The shared HTTP client
+refuses to follow a redirect that leaves the original HTTPS origin, so a credentialed
+request cannot be steered somewhere else.
 
 **We skip app-bound encrypted cookies, we do not bypass them.** Chrome and Edge now
 encrypt newer cookies with app-bound encryption (v20). Reading those requires COM
@@ -116,15 +120,30 @@ default.
 style tokens, and email addresses are replaced before the line is written.
 
 **Where your own secrets live.** API keys and any manually pasted cookie headers are
-stored in `%APPDATA%\AgentBar\config.json`, protected by the standard Windows ACL on your
-user profile. Be aware that this file is plaintext JSON: another program running as you
-can read it, and it should not be pasted into a bug report. AgentBar itself redacts those
-fields whenever it hands the config to its own UI.
+stored in `%APPDATA%\AgentBar\config.json` wrapped with Windows DPAPI
+(`CryptProtectData`, current user scope) behind a `dpapi:` prefix. Be clear about what
+that buys you: it does **not** stop code running as you. Anything running under your
+account can call `CryptUnprotectData` and read those values back, exactly the way AgentBar
+does. It is not a keystore and there is no master password. What it does stop is the file
+leaking as readable text: an `%APPDATA%` folder synced to OneDrive, a config pasted into a
+bug report, a backup or disk image opened on another machine, and file-scraping stealers
+that grab known config paths without executing anything. Plaintext values still load, so
+the file stays hand editable and a config from an older build is never locked out; it is
+re-wrapped on the next save. AgentBar also redacts those fields whenever it hands the
+config to its own UI, and the diagnostics report in Settings contains none of them.
 
 ## Install
 
 Download `AgentBar_x64-setup.exe` from Releases and run it, or build from source. The
 installer is a per-user install, so it does not ask for administrator rights.
+
+AgentBar checks for updates when it starts and from the tray menu. It never installs one
+without asking, and it will only install an update signed with the AgentBar release key.
+
+The installer is not code signed, so Windows SmartScreen shows "Windows protected your
+PC" the first time you run it. Choose **More info**, then **Run anyway**. Every release
+publishes a SHA256 you can check first with
+`Get-FileHash .\AgentBar_x64-setup.exe`.
 
 ### Build from source
 
@@ -138,11 +157,35 @@ npx tauri build
 The installer lands in `src-tauri/target/release/bundle/nsis/`, the portable exe in
 `src-tauri/target/release/agentbar.exe`. For development use `npx tauri dev`.
 
+The last line of that build reads `A public key has been found, but no private key`. That
+is expected and harmless when you build from source: the installer and the exe are already
+finished at that point, and only the signed updater manifest is skipped, because signing it
+needs the AgentBar release private key. Your build works; it simply cannot publish an
+update that existing installs would accept.
+
 ## Configuration
 
-Settings live in `%APPDATA%\AgentBar\config.json` (refresh interval, enabled
+Settings live in `%APPDATA%\AgentBar\config.json` (refresh cadence, enabled
 providers, API keys, cookie source per provider, pinned provider, launch at startup).
 Everything is editable from the Settings view in the popover.
+
+**Refresh cadence.** Adaptive is the default on a fresh install: AgentBar refreshes every
+2 minutes while you are actively opening the popover and backs off to 30 minutes when you
+are not, or under Windows battery saver. Pick a fixed interval instead if you would rather
+it be predictable. An existing install keeps the interval it already had.
+
+**API keys from the environment.** If you already export a provider's key, AgentBar reads
+it and you do not have to paste it into Settings. A key saved in Settings always wins, so
+a stale export can never silently shadow it. The variables are `OPENAI_API_KEY`,
+`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `ELEVENLABS_API_KEY`, `DEEPGRAM_API_KEY`,
+`Z_AI_API_KEY`, `MINIMAX_API_KEY`, `KIMI_CODE_API_KEY`, `XAI_MANAGEMENT_API_KEY` and
+`WARP_API_KEY`.
+
+**Support.** Settings has a **Copy report** button that puts a diagnostics summary on the
+clipboard for a bug report. It lists versions, which providers are configured and how each
+one last fared, and it deliberately contains no keys, cookies, tokens or email addresses.
+**Clear cached cookies** re-reads your browser immediately, which is the fix after signing
+back in to a provider.
 
 ## Credits
 

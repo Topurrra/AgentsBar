@@ -1,6 +1,6 @@
 [package]
 name = "agentbar"
-version = "0.1.0"
+version = "0.2.0"
 description = "AI coding provider usage limits in the Windows system tray"
 authors = ["AgentBar"]
 edition = "2021"
@@ -20,6 +20,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-log = "2"
+tauri-plugin-updater = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +30,10 @@ dirs = "6"
 async-trait = "0.1"
 ab_glyph = "0.2"
 base64 = "0.22"
+# Row 35. Hashes the account half of a history series key so a profile email never reaches
+# history.json in the clear. Already compiled in the tree under rustls, so this costs no
+# additional crate.
+sha2 = "0.10"
 log = "0.4"
 thiserror = "2"
 # Browser cookie import. The `rookie` crate was evaluated first and rejected: 189
@@ -37,7 +42,12 @@ thiserror = "2"
 # for raw NTFS sector reads). These three do the supported subset in ~300 lines.
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
-windows = { version = "0.61.3", features = ["Win32_Security_Cryptography"] }
+windows = { version = "0.61.3", features = [
+    "Win32_Security_Cryptography",
+    # MessageBoxW, for the updater's "install this?" prompt. Cheaper than adding
+    # tauri-plugin-dialog and rfd for two message boxes.
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 # Already in the tree under reqwest; named here only so a test can build a canned

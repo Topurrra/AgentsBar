@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, NaiveTime, Utc};
 use serde::Deserialize;
 
+use super::api_token::{api_key, has_api_key};
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow};
 use crate::config::Config;
 
@@ -39,17 +40,16 @@ impl Provider for OpenAi {
         "https://platform.openai.com/settings/organization/admin-keys"
     }
 
+    fn env_key(&self) -> Option<&'static str> {
+        Some("OPENAI_API_KEY")
+    }
+
     fn is_configured(&self, config: &Config) -> bool {
-        config.api_key("openai").is_some()
+        has_api_key(config, self)
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let key = ctx
-            .config
-            .api_key("openai")
-            .ok_or(ProviderError::NotConfigured)?
-            .trim()
-            .to_string();
+        let key = api_key(&ctx.config, self)?;
 
         match fetch_spend(&ctx.http, &key).await {
             Ok(spend) => {
@@ -129,10 +129,9 @@ async fn fetch_spend(http: &reqwest::Client, key: &str) -> Result<f64, ProviderE
             ));
         }
         if !status.is_success() {
-            return Err(ProviderError::Http(format!(
-                "OpenAI costs request failed with HTTP {}",
-                status.as_u16()
-            )));
+            return Err(super::util::http_error(&response, || {
+                format!("OpenAI costs request failed with HTTP {}", status.as_u16())
+            }));
         }
 
         let body: CostsResponse = response
@@ -197,10 +196,12 @@ async fn fetch_balance(http: &reqwest::Client, key: &str) -> Result<UsageSnapsho
         .await?;
     let status = response.status();
     if !status.is_success() {
-        return Err(ProviderError::Http(format!(
-            "OpenAI credit balance request failed with HTTP {}",
-            status.as_u16()
-        )));
+        return Err(super::util::http_error(&response, || {
+            format!(
+                "OpenAI credit balance request failed with HTTP {}",
+                status.as_u16()
+            )
+        }));
     }
     let grants: CreditGrants = response
         .json()

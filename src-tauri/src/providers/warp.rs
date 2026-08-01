@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use super::api_token::{api_key, parse_rfc3339, post_json, Auth};
+use super::api_token::{api_key, has_api_key, parse_rfc3339, post_json, Auth};
 use super::util::percent;
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow};
 use crate::config::Config;
@@ -77,16 +77,20 @@ impl Provider for Warp {
         "https://docs.warp.dev/reference/cli/api-keys"
     }
 
+    fn env_key(&self) -> Option<&'static str> {
+        Some("WARP_API_KEY")
+    }
+
     fn is_configured(&self, config: &Config) -> bool {
-        config.api_key(self.id()).is_some()
+        has_api_key(config, self)
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let key = api_key(&ctx.config, self.id())?;
+        let key = api_key(&ctx.config, self)?;
         let body: Value = post_json(
             &ctx.http,
             API_URL,
-            &Auth::Bearer(key),
+            &Auth::Bearer(&key),
             &[
                 ("x-warp-client-id", "warp-app"),
                 ("x-warp-os-category", OS_CATEGORY),

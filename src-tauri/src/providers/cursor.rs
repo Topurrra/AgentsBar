@@ -104,17 +104,24 @@ async fn web_send(
     if status == 429 {
         // Vercel and Cloudflare answer a bot mitigation challenge with a 429 and a marker
         // header. That is not a rate limit and waiting does not clear it: the browser has
-        // to pass the check so the clearance cookie lands in the jar we read.
+        // to pass the check so the clearance cookie lands in the jar we read. So only the
+        // bare 429 becomes a `RateLimited`, which honours the server's `Retry-After` and
+        // reads as self-healing on the tile; the challenge stays an `Http` the user has to
+        // act on, with the instructions in the message.
         let challenged = ["x-vercel-mitigated", "cf-mitigated"]
             .iter()
             .any(|h| resp.headers().contains_key(*h));
-        return Err(ProviderError::Http(if challenged {
-            "blocked by the site's bot mitigation (HTTP 429 challenge). Open the provider's \
-             site in your browser, pass the check, then refresh"
-                .to_string()
+        return Err(if challenged {
+            ProviderError::Http(
+                "blocked by the site's bot mitigation (HTTP 429 challenge). Open the \
+                 provider's site in your browser, pass the check, then refresh"
+                    .to_string(),
+            )
         } else {
-            "HTTP 429, rate limited by the provider. Try again in a few minutes".to_string()
-        }));
+            ProviderError::RateLimited {
+                retry_after: super::retry_after_of(&resp),
+            }
+        });
     }
     if !status.is_success() {
         return Err(ProviderError::Http(format!("HTTP {}", status.as_u16())));

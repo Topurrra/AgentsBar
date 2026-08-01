@@ -103,10 +103,9 @@ impl Provider for Windsurf {
                     status.as_u16()
                 ))
                 } else {
-                    ProviderError::Http(format!(
-                        "Windsurf GetPlanStatus returned HTTP {}",
-                        status.as_u16()
-                    ))
+                    super::util::http_error(&response, || {
+                        format!("Windsurf GetPlanStatus returned HTTP {}", status.as_u16())
+                    })
                 },
             );
         }
