@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::api_token::{parse_rfc3339, TIMEOUT};
-use super::util::percent;
+use super::util::{is_login_url, percent, redirect_target};
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow, Want};
 use crate::config::Config;
 
@@ -86,6 +86,20 @@ async fn web_send(
     let status = resp.status();
     if status == 401 || status == 403 {
         return Err(ProviderError::Auth(signin_hint.to_string()));
+    }
+    if let Some(target) = redirect_target(&resp) {
+        // The client stops a redirect chain that leaves the request origin, so a 3xx is
+        // the response, not a hop. A signed out session gets bounced to an identity
+        // provider, and calling that `Http` would keep stale numbers on screen and never
+        // try the next candidate browser.
+        return Err(if is_login_url(target) {
+            ProviderError::Auth(signin_hint.to_string())
+        } else {
+            ProviderError::Http(format!(
+                "HTTP {}, redirected off the request origin and not followed",
+                status.as_u16()
+            ))
+        });
     }
     if status == 429 {
         // Vercel and Cloudflare answer a bot mitigation challenge with a 429 and a marker
@@ -223,13 +237,13 @@ impl UsageSummary {
     /// ratio, then the personal enterprise cap, then the shared team pool.
     fn total_percent(&self) -> f64 {
         let plan = self.plan();
-        let auto = plan.and_then(|p| p.auto_percent).map(clamp_percent);
-        let api = plan.and_then(|p| p.api_percent).map(clamp_percent);
+        let auto = plan.and_then(|p| p.auto_percent);
+        let api = plan.and_then(|p| p.api_percent);
         if let Some(total) = plan.and_then(|p| p.total_percent) {
-            return clamp_percent(total);
+            return total;
         }
         match (auto, api) {
-            (Some(a), Some(b)) => return clamp_percent((a + b) / 2.0),
+            (Some(a), Some(b)) => return (a + b) / 2.0,
             (None, Some(b)) => return b,
             (Some(a), None) => return a,
             (None, None) => {}
@@ -272,14 +286,6 @@ impl UsageSummary {
     }
 }
 
-fn clamp_percent(raw: f64) -> f64 {
-    if raw.is_finite() {
-        raw.clamp(0.0, 100.0)
-    } else {
-        0.0
-    }
-}
-
 /// "pro" reads as "Cursor Pro", anything unknown keeps its own capitalisation.
 fn membership_label(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -300,12 +306,7 @@ fn window(
     resets_at: Option<DateTime<Utc>>,
     minutes: Option<u64>,
 ) -> UsageWindow {
-    UsageWindow {
-        label: label.to_string(),
-        used_percent,
-        resets_at,
-        window_minutes: minutes,
-    }
+    UsageWindow::new(label, Some(used_percent), resets_at, minutes)
 }
 
 fn to_snapshot(summary: &UsageSummary, user: &UserInfo, requests: &RequestUsage) -> UsageSnapshot {
@@ -339,10 +340,10 @@ fn to_snapshot(summary: &UsageSummary, user: &UserInfo, requests: &RequestUsage)
         let plan = summary.plan();
         snapshot.secondary = plan
             .and_then(|p| p.auto_percent)
-            .map(|p| window("Auto", clamp_percent(p), end, minutes));
+            .map(|p| window("Auto", p, end, minutes));
         snapshot.tertiary = plan
             .and_then(|p| p.api_percent)
-            .map(|p| window("API", clamp_percent(p), end, minutes));
+            .map(|p| window("API", p, end, minutes));
     }
     // Credits reads as a remaining balance everywhere else in the app, so only a capped
     // on-demand budget produces one. An uncapped budget has no balance to report.
@@ -391,48 +392,53 @@ impl Provider for Cursor {
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let cookie = ctx
-            .cookie_header(self.id(), DOMAINS, Want::Jar(SESSION_NAMES))
-            .map_err(|e| {
-                ProviderError::Auth(format!(
-                    "no Cursor session cookie found: {e}. Sign in at cursor.com, or paste a \
-                     cookie header in Settings"
-                ))
-            })?;
-        let headers = [("Accept", "application/json"), ("Cookie", cookie.as_str())];
-
-        let summary: UsageSummary = parse_json(
-            &web_get(
-                &ctx.http,
-                &format!("{BASE}/api/usage-summary"),
-                &headers,
-                SIGNIN_HINT,
-            )
-            .await?,
-        )?;
-
-        // Identity is a bonus, and the user id it carries only matters to legacy plans.
-        let user: UserInfo = web_get(
-            &ctx.http,
-            &format!("{BASE}/api/auth/me"),
-            &headers,
+        ctx.with_cookies(
+            self.id(),
+            DOMAINS,
+            Want::Jar(SESSION_NAMES),
             SIGNIN_HINT,
+            |cookie| async move {
+                let headers = [("Accept", "application/json"), ("Cookie", cookie.as_str())];
+
+                // `web_get` maps 401 and 403 to `Auth`, so a logged out browser hands the
+                // walk on to the next one here, on the first call.
+                let summary: UsageSummary = parse_json(
+                    &web_get(
+                        &ctx.http,
+                        &format!("{BASE}/api/usage-summary"),
+                        &headers,
+                        SIGNIN_HINT,
+                    )
+                    .await?,
+                )?;
+
+                // Identity is a bonus, and the user id it carries only matters to legacy
+                // plans.
+                let user: UserInfo = web_get(
+                    &ctx.http,
+                    &format!("{BASE}/api/auth/me"),
+                    &headers,
+                    SIGNIN_HINT,
+                )
+                .await
+                .ok()
+                .and_then(|text| parse_json(&text).ok())
+                .unwrap_or_default();
+
+                let mut requests = RequestUsage::default();
+                if let Some(id) = user.sub.as_deref().filter(|s| !s.is_empty()) {
+                    // Not every plan has this endpoint, so a failure here is not a fetch
+                    // failure.
+                    let url = format!("{BASE}/api/usage?user={}", urlencode(id));
+                    if let Ok(text) = web_get(&ctx.http, &url, &headers, SIGNIN_HINT).await {
+                        requests = parse_json(&text).unwrap_or_default();
+                    }
+                }
+
+                Ok(to_snapshot(&summary, &user, &requests))
+            },
         )
         .await
-        .ok()
-        .and_then(|text| parse_json(&text).ok())
-        .unwrap_or_default();
-
-        let mut requests = RequestUsage::default();
-        if let Some(id) = user.sub.as_deref().filter(|s| !s.is_empty()) {
-            // Not every plan has this endpoint, so a failure here is not a fetch failure.
-            let url = format!("{BASE}/api/usage?user={}", urlencode(id));
-            if let Ok(text) = web_get(&ctx.http, &url, &headers, SIGNIN_HINT).await {
-                requests = parse_json(&text).unwrap_or_default();
-            }
-        }
-
-        Ok(to_snapshot(&summary, &user, &requests))
     }
 }
 
@@ -454,8 +460,8 @@ mod tests {
 
     /// Shape from Tests/CodexBarTests/CursorStatusProbeTests.swift.
     const PRO: &str = r#"{
-        "billingCycleStart": "2025-01-01T00:00:00.000Z",
-        "billingCycleEnd": "2025-02-01T00:00:00.000Z",
+        "billingCycleStart": "2033-01-01T00:00:00.000Z",
+        "billingCycleEnd": "2033-02-01T00:00:00.000Z",
         "membershipType": "pro",
         "individualUsage": {
             "plan": {
@@ -482,12 +488,12 @@ mod tests {
         let snap = snapshot_of(PRO, "{}");
         let primary = snap.primary.unwrap();
         assert_eq!(primary.label, "Total");
-        assert_eq!(primary.used_percent, 30.0);
-        assert_eq!(primary.resets_at.unwrap().timestamp(), 1_738_368_000);
+        assert_eq!(primary.used_percent, Some(30.0));
+        assert_eq!(primary.resets_at.unwrap().timestamp(), 1_990_828_800);
         // A 31 day billing cycle.
         assert_eq!(primary.window_minutes, Some(31 * 24 * 60));
         assert_eq!(snap.secondary.unwrap().label, "Auto");
-        assert_eq!(snap.tertiary.unwrap().used_percent, 40.0);
+        assert_eq!(snap.tertiary.unwrap().used_percent, Some(40.0));
         assert_eq!(snap.plan.as_deref(), Some("Cursor Pro"));
         assert_eq!(snap.account.as_deref(), Some("user@example.com"));
         // Personal on-demand: $100.00 cap, $5.00 spent.
@@ -500,7 +506,7 @@ mod tests {
             r#"{"individualUsage":{"plan":{"autoPercentUsed":20,"apiPercentUsed":40}}}"#,
             "{}",
         );
-        assert_eq!(snap.primary.unwrap().used_percent, 30.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(30.0));
     }
 
     #[test]
@@ -510,22 +516,22 @@ mod tests {
             r#"{"individualUsage":{"plan":{"used":4900,"limit":50000}}}"#,
             "{}",
         );
-        assert_eq!(snap.primary.unwrap().used_percent, 9.8);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(9.8));
 
         // Enterprise personal cap when no plan block exists at all.
         let snap = snapshot_of(
             r#"{"individualUsage":{"overall":{"used":7384,"limit":10000}}}"#,
             "{}",
         );
-        assert!((snap.primary.unwrap().used_percent - 73.84).abs() < 1e-9);
+        assert!((snap.primary.unwrap().used_percent.unwrap() - 73.84).abs() < 1e-9);
 
         // Shared pool as the last resort.
         let snap = snapshot_of(r#"{"teamUsage":{"pooled":{"used":50,"limit":200}}}"#, "{}");
-        assert_eq!(snap.primary.unwrap().used_percent, 25.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(25.0));
 
         // Nothing at all reads as zero rather than an error.
         let snap = snapshot_of("{}", "{}");
-        assert_eq!(snap.primary.unwrap().used_percent, 0.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(0.0));
         assert_eq!(snap.credits, None);
     }
 
@@ -536,7 +542,7 @@ mod tests {
             r#"{"gpt-4":{"numRequests":120,"numRequestsTotal":250,"maxRequestUsage":500}}"#,
         );
         // numRequestsTotal wins over numRequests.
-        assert_eq!(snap.primary.unwrap().used_percent, 50.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(50.0));
         assert!(snap.secondary.is_none());
         assert!(snap.tertiary.is_none());
     }
@@ -545,7 +551,7 @@ mod tests {
     fn a_token_based_plan_ignores_the_usage_endpoint() {
         // maxRequestUsage absent means the account is not request based.
         let snap = snapshot_of(PRO, r#"{"gpt-4":{"numRequests":120}}"#);
-        assert_eq!(snap.primary.unwrap().used_percent, 30.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(30.0));
         assert!(snap.secondary.is_some());
     }
 
@@ -556,7 +562,7 @@ mod tests {
                 "teamUsage":{"onDemand":{"used":2000,"limit":50000}}}"#,
             "{}",
         );
-        assert_eq!(snap.primary.unwrap().used_percent, 100.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(100.0));
         // No personal cap, so the team budget is the one with a balance.
         assert_eq!(snap.credits, Some(480.0));
     }
@@ -597,14 +603,14 @@ mod tests {
                         .flatten()
                     {
                         println!(
-                            "{}: {} {:.1}% used, resets {:?}, window {:?}",
+                            "{}: {} {:?}% used, resets {:?}, window {:?}",
                             provider.name(),
                             lane.label,
                             lane.used_percent,
                             lane.resets_at,
                             lane.window_minutes
                         );
-                        assert!((0.0..=100.0).contains(&lane.used_percent));
+                        assert!(lane.used_percent.is_none_or(|p| (0.0..=100.0).contains(&p)));
                     }
                     println!(
                         "{}: plan {:?}, credits {:?}",
@@ -612,7 +618,11 @@ mod tests {
                         snap.plan,
                         snap.credits
                     );
-                    assert!(snap.primary.is_some(), "{}: no primary lane", provider.name());
+                    assert!(
+                        snap.primary.is_some(),
+                        "{}: no primary lane",
+                        provider.name()
+                    );
                 }
                 Err(e) => println!("{}: FAILED: {e}", provider.name()),
             }

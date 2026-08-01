@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 
 use super::api_token::TIMEOUT;
-use super::util::percent;
+use super::util::{is_login_url, percent, redirect_target};
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow, Want};
 use crate::config::Config;
 
@@ -56,47 +56,64 @@ impl Provider for Amp {
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let header = ctx.cookie_header(self.id(), &DOMAINS, Want::All(&NAMES))?;
-        let response = ctx
-            .http
-            .get(SETTINGS_URL)
-            .header("Cookie", header)
-            .header(
-                "Accept",
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            )
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Origin", "https://ampcode.com")
-            .header("Referer", SETTINGS_URL)
-            .header("User-Agent", USER_AGENT)
-            .timeout(TIMEOUT)
-            .send()
-            .await?;
+        ctx.with_cookies(
+            self.id(),
+            &DOMAINS,
+            Want::All(&NAMES),
+            SIGNIN_HINT,
+            |cookie| async move {
+                let response = ctx
+                    .http
+                    .get(SETTINGS_URL)
+                    .header("Cookie", cookie)
+                    .header(
+                        "Accept",
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    )
+                    .header("Accept-Language", "en-US,en;q=0.9")
+                    .header("Origin", "https://ampcode.com")
+                    .header("Referer", SETTINGS_URL)
+                    .header("User-Agent", USER_AGENT)
+                    .timeout(TIMEOUT)
+                    .send()
+                    .await?;
 
-        let status = response.status();
-        // A redirect chain that ends on a sign-in page is an expired session, not a 200
-        // worth parsing.
-        let landed_on_login = is_login_url(response.url().as_str());
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-            || landed_on_login
-        {
-            return Err(expired());
-        }
-        if !status.is_success() {
-            return Err(ProviderError::Http(format!(
-                "Amp settings page returned HTTP {}",
-                status.as_u16()
-            )));
-        }
+                let status = response.status();
+                // A redirect chain that ends on a sign-in page is an expired session, not
+                // a 200 worth parsing. It has to be `Auth` so the next browser is tried.
+                //
+                // Amp bounces a dead session to auth.ampcode.com, which is off origin, so
+                // the shared client stops the chain and hands us the 302 itself: the
+                // landing URL is still /settings and only `Location` names the login page.
+                // Without the second test that reads as a bare `Http(302)`, which keeps a
+                // dead session's stale numbers on screen and never tries the next browser.
+                let landed_on_login = is_login_url(response.url().as_str())
+                    || redirect_target(&response).is_some_and(is_login_url);
+                if status == reqwest::StatusCode::UNAUTHORIZED
+                    || status == reqwest::StatusCode::FORBIDDEN
+                    || landed_on_login
+                {
+                    return Err(expired());
+                }
+                if !status.is_success() {
+                    return Err(ProviderError::Http(format!(
+                        "Amp settings page returned HTTP {}",
+                        status.as_u16()
+                    )));
+                }
 
-        let html = response
-            .text()
-            .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
-        snapshot(&html)
+                let html = response
+                    .text()
+                    .await
+                    .map_err(|e| ProviderError::Http(e.to_string()))?;
+                snapshot(&html)
+            },
+        )
+        .await
     }
 }
+
+const SIGNIN_HINT: &str = "Sign in at ampcode.com, or paste a cookie header in Settings";
 
 fn expired() -> ProviderError {
     ProviderError::Auth(
@@ -104,19 +121,6 @@ fn expired() -> ProviderError {
          header in Settings"
             .into(),
     )
-}
-
-fn is_login_url(url: &str) -> bool {
-    let path = url
-        .split_once("://")
-        .map_or(url, |(_, rest)| rest)
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    path.split('/')
-        .any(|segment| matches!(segment, "login" | "signin" | "sign-in"))
-        || url.to_ascii_lowercase().contains("auth.ampcode.com")
 }
 
 /// Amp renders "Sign in" only when the session did not authenticate the page.
@@ -138,19 +142,21 @@ fn snapshot(html: &str) -> Result<UsageSnapshot, ProviderError> {
 
     let mut snap = UsageSnapshot::new("amp");
     snap.plan = Some("Amp Free".into());
-    snap.primary = Some(UsageWindow {
-        label: "Amp Free".into(),
-        used_percent: percent(usage.used, usage.quota),
+    let now = Utc::now();
+    snap.primary = Some(UsageWindow::at(
+        "Amp Free",
+        Some(percent(usage.used, usage.quota)),
         // The free tier refills continuously, so it is empty again once the used credits
         // have been replenished at the hourly rate.
-        resets_at: (usage.quota > 0.0 && usage.hourly_replenishment > 0.0)
+        (usage.quota > 0.0 && usage.hourly_replenishment > 0.0)
             .then(|| {
                 let seconds = (usage.used / usage.hourly_replenishment * 3600.0).max(0.0);
-                Utc::now().checked_add_signed(Duration::seconds(seconds as i64))
+                now.checked_add_signed(Duration::seconds(seconds as i64))
             })
             .flatten(),
-        window_minutes: usage.window_minutes(),
-    });
+        usage.window_minutes(),
+        now,
+    ));
     Ok(snap)
 }
 
@@ -336,7 +342,7 @@ mod tests {
     fn the_page_maps_to_a_used_percent_and_a_refill_time() {
         let snap = snapshot(PAGE).unwrap();
         let primary = snap.primary.unwrap();
-        assert_eq!(primary.used_percent, 25.0);
+        assert_eq!(primary.used_percent, Some(25.0));
         assert_eq!(primary.window_minutes, Some(600));
         // 25 used at 10 per hour is 2.5 hours to a full refill.
         let seconds = primary.resets_at.unwrap().timestamp() - Utc::now().timestamp();
@@ -357,16 +363,30 @@ mod tests {
         ));
     }
 
+    /// The sign-out bounce leaves ampcode.com, so the shared client stops it and the 302
+    /// arrives here with the landing URL still on /settings. Only `Location` says login,
+    /// and reading it is what keeps a dead session an `Auth` error rather than an
+    /// `Http(302)` that hides behind the last good numbers.
     #[test]
-    fn login_redirect_targets_are_recognised() {
-        assert!(is_login_url(
-            "https://ampcode.com/auth/sign-in?returnTo=/settings"
-        ));
-        assert!(is_login_url("https://auth.ampcode.com/authorize"));
-        assert!(is_login_url("https://ampcode.com/login"));
-        assert!(!is_login_url("https://ampcode.com/settings"));
-        // "logins" is not "login".
-        assert!(!is_login_url("https://ampcode.com/settings/logins"));
+    fn a_stopped_sign_out_redirect_is_read_from_its_location_header() {
+        let bounce = http::Response::builder()
+            .status(302)
+            .header(
+                "location",
+                "https://auth.ampcode.com/authorize?next=/settings",
+            )
+            .body(Vec::new())
+            .unwrap();
+        let bounce = reqwest::Response::from(bounce);
+        assert!(
+            !is_login_url(bounce.url().as_str()),
+            "the landing URL alone proves nothing"
+        );
+        assert!(redirect_target(&bounce).is_some_and(is_login_url));
+
+        // A 200 carries no Location, so nothing here fires on a healthy page.
+        let ok = reqwest::Response::from(http::Response::new(Vec::new()));
+        assert_eq!(redirect_target(&ok), None);
     }
 
     /// cargo test -p agentbar amp_live -- --ignored --nocapture

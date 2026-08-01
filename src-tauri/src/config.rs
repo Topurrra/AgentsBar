@@ -257,7 +257,8 @@ mod tests {
         assert!(!cfg.is_enabled("openrouter"));
 
         // Partial file: missing keys default, missing providers get filled in.
-        let cfg = Config::parse(r#"{"refresh_minutes":0,"providers":{"openrouter":{"enabled":true}}}"#);
+        let cfg =
+            Config::parse(r#"{"refresh_minutes":0,"providers":{"openrouter":{"enabled":true}}}"#);
         assert_eq!(cfg.refresh_minutes, 1);
         assert!(cfg.is_enabled("openrouter"));
         assert!(cfg.provider("codex").is_some());

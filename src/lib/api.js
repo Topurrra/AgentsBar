@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // Backend commands may be stubs or fail while the app is starting.
 // Every call resolves: null on failure, so the UI never breaks.
@@ -15,6 +16,11 @@ export async function call(cmd, args) {
 export function openUrl(url) {
   if (url) call("plugin:opener|open_url", { url });
 }
+
+// Escape closes the popover. Hiding from here rather than through a command on purpose:
+// tray.rs only arms its reopen grace window when the blur handler is the one hiding, so
+// hiding first leaves the next tray click free to reopen.
+export const hidePopover = () => getCurrentWindow().hide().catch(() => {});
 
 // Wave 2 commands. Thin wrappers so component code never repeats a command name.
 export const listBrowsers = () => call("list_browsers");

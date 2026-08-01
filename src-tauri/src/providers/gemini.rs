@@ -132,7 +132,10 @@ impl Provider for Gemini {
         let mut snap = UsageSnapshot::new("gemini");
         snap.primary = window("Pro", quotas.iter().filter(|q| is_pro(&q.model)));
         snap.secondary = window("Flash", quotas.iter().filter(|q| is_flash(&q.model)));
-        snap.tertiary = window("Flash Lite", quotas.iter().filter(|q| is_flash_lite(&q.model)));
+        snap.tertiary = window(
+            "Flash Lite",
+            quotas.iter().filter(|q| is_flash_lite(&q.model)),
+        );
         snap.account = claims.email;
         snap.plan = account_plan(
             status.tier.as_deref(),
@@ -250,7 +253,10 @@ async fn load_code_assist(
 
     let project = json["cloudaicompanionProject"]
         .as_str()
-        .or_else(|| json.pointer("/cloudaicompanionProject/id").and_then(Value::as_str))
+        .or_else(|| {
+            json.pointer("/cloudaicompanionProject/id")
+                .and_then(Value::as_str)
+        })
         .or_else(|| {
             json.pointer("/cloudaicompanionProject/projectId")
                 .and_then(Value::as_str)
@@ -398,24 +404,22 @@ fn is_pro(model: &str) -> bool {
 }
 
 /// Lowest quota of a model tier as a window. Gemini quotas roll over daily.
-fn window<'a>(
-    label: &str,
-    quotas: impl Iterator<Item = &'a ModelQuota>,
-) -> Option<UsageWindow> {
+fn window<'a>(label: &str, quotas: impl Iterator<Item = &'a ModelQuota>) -> Option<UsageWindow> {
     let lowest = quotas.min_by(|a, b| a.percent_left.total_cmp(&b.percent_left))?;
-    Some(UsageWindow {
-        label: label.to_string(),
-        used_percent: (100.0 - lowest.percent_left).clamp(0.0, 100.0),
-        resets_at: lowest.resets_at,
-        window_minutes: Some(1440),
-    })
+    Some(UsageWindow::new(
+        label,
+        Some(100.0 - lowest.percent_left),
+        lowest.resets_at,
+        Some(1440),
+    ))
 }
 
 fn claims_from_id_token(id_token: Option<&str>) -> Claims {
     let Some(payload) = id_token.and_then(|t| t.split('.').nth(1)) else {
         return Claims::default();
     };
-    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('='))
+    let Ok(bytes) =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('='))
     else {
         return Claims::default();
     };
@@ -429,7 +433,11 @@ fn claims_from_id_token(id_token: Option<&str>) -> Claims {
 }
 
 /// A named paid tier wins over the tier id, matching the Gemini CLI contract.
-fn account_plan(tier: Option<&str>, hosted_domain: Option<&str>, paid: Option<&str>) -> Option<String> {
+fn account_plan(
+    tier: Option<&str>,
+    hosted_domain: Option<&str>,
+    paid: Option<&str>,
+) -> Option<String> {
     if let Some(paid) = paid {
         return Some(paid.to_string());
     }
@@ -483,7 +491,7 @@ mod tests {
             },
         ];
         let w = window("Flash", quotas.iter()).unwrap();
-        assert_eq!(w.used_percent, 87.5);
+        assert_eq!(w.used_percent, Some(87.5));
         assert_eq!(w.window_minutes, Some(1440));
     }
 
@@ -493,7 +501,10 @@ mod tests {
             account_plan(Some("free-tier"), None, Some("Google AI Pro")).as_deref(),
             Some("Google AI Pro")
         );
-        assert_eq!(account_plan(Some("free-tier"), Some("acme.com"), None).as_deref(), Some("Workspace"));
+        assert_eq!(
+            account_plan(Some("free-tier"), Some("acme.com"), None).as_deref(),
+            Some("Workspace")
+        );
         assert_eq!(account_plan(None, None, None), None);
     }
 

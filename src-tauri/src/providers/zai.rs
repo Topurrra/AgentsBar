@@ -75,10 +75,7 @@ impl LimitRaw {
     /// z.ai sometimes omits the quota counters, so a computed percent is preferred
     /// but the raw `percentage` (which can fall outside 0...100) is the fallback.
     fn used_percent(&self) -> f64 {
-        if let Some(computed) = self.computed_used_percent() {
-            return computed;
-        }
-        self.percentage.clamp(0.0, 100.0)
+        self.computed_used_percent().unwrap_or(self.percentage)
     }
 
     fn computed_used_percent(&self) -> Option<f64> {
@@ -111,18 +108,18 @@ impl LimitRaw {
     }
 
     fn to_window(&self) -> UsageWindow {
-        UsageWindow {
-            label: self.label(),
-            used_percent: self.used_percent(),
-            resets_at: self.next_reset_time.and_then(epoch_to_utc),
+        UsageWindow::new(
+            self.label(),
+            Some(self.used_percent()),
+            self.next_reset_time.and_then(epoch_to_utc),
             // A TIME_LIMIT entry counts calls per calendar month; only token
             // windows carry a real duration.
-            window_minutes: if self.is_tokens() {
+            if self.is_tokens() {
                 self.window_minutes()
             } else {
                 None
             },
-        }
+        )
     }
 }
 
@@ -237,7 +234,7 @@ mod tests {
             "currentValue": 13628365,
             "remaining": 26371635,
             "percentage": 34,
-            "nextResetTime": 1768507567547
+            "nextResetTime": 2000000000000
           }
         ],
         "planName": "Pro"
@@ -252,14 +249,14 @@ mod tests {
 
         let primary = snapshot.primary.unwrap();
         assert_eq!(primary.label, "5h");
-        assert!((primary.used_percent - 34.070_912_5).abs() < 0.001);
+        assert!((primary.used_percent.unwrap() - 34.070_912_5).abs() < 0.001);
         assert_eq!(primary.window_minutes, Some(300));
-        assert_eq!(primary.resets_at.unwrap().timestamp(), 1_768_507_567);
+        assert_eq!(primary.resets_at.unwrap().timestamp(), 2_000_000_000);
 
         let secondary = snapshot.secondary.unwrap();
         assert_eq!(secondary.label, "Monthly");
         // currentValue over the ceiling clamps to full, never past it.
-        assert_eq!(secondary.used_percent, 100.0);
+        assert_eq!(secondary.used_percent, Some(100.0));
         assert_eq!(secondary.window_minutes, None);
 
         assert!(snapshot.tertiary.is_none());
@@ -275,7 +272,7 @@ mod tests {
         )
         .unwrap();
         let snapshot = to_snapshot(parsed).unwrap();
-        assert_eq!(snapshot.primary.unwrap().used_percent, 34.0);
+        assert_eq!(snapshot.primary.unwrap().used_percent, Some(34.0));
     }
 
     #[test]

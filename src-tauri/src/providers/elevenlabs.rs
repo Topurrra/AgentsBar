@@ -33,12 +33,12 @@ fn slot_window(label: &str, used: Option<i64>, limit: Option<i64>) -> Option<Usa
     if limit <= 0 {
         return None;
     }
-    Some(UsageWindow {
-        label: label.to_string(),
-        used_percent: percent(used as f64, limit as f64),
-        resets_at: None,
-        window_minutes: None,
-    })
+    Some(UsageWindow::new(
+        label,
+        Some(percent(used as f64, limit as f64)),
+        None,
+        None,
+    ))
 }
 
 /// "creator" -> "Creator", "pro_voice" -> "Pro Voice", plus the status when it is
@@ -76,12 +76,15 @@ fn plan_label(sub: &Subscription) -> Option<String> {
 fn to_snapshot(sub: &Subscription) -> UsageSnapshot {
     let mut snapshot = UsageSnapshot::new("elevenlabs");
     if sub.character_limit > 0 {
-        snapshot.primary = Some(UsageWindow {
-            label: "Credits".to_string(),
-            used_percent: percent(sub.character_count as f64, sub.character_limit as f64),
-            resets_at: sub.next_character_count_reset_unix.and_then(epoch_to_utc),
-            window_minutes: None,
-        });
+        snapshot.primary = Some(UsageWindow::new(
+            "Credits",
+            Some(percent(
+                sub.character_count as f64,
+                sub.character_limit as f64,
+            )),
+            sub.next_character_count_reset_unix.and_then(epoch_to_utc),
+            None,
+        ));
     }
     snapshot.secondary = slot_window("Voice slots", sub.voice_slots_used, sub.voice_limit);
     snapshot.tertiary = slot_window(
@@ -144,7 +147,7 @@ mod tests {
       "professional_voice_limit": 2,
       "current_overage": {"amount": "0", "currency": "usd"},
       "status": "active",
-      "next_character_count_reset_unix": 1738356858
+      "next_character_count_reset_unix": 2000000000
     }"#;
 
     #[test]
@@ -152,10 +155,10 @@ mod tests {
         let sub: Subscription = serde_json::from_str(SAMPLE).unwrap();
         let snapshot = to_snapshot(&sub);
         let primary = snapshot.primary.unwrap();
-        assert_eq!(primary.used_percent, 25.0);
-        assert_eq!(primary.resets_at.unwrap().timestamp(), 1_738_356_858);
-        assert_eq!(snapshot.secondary.unwrap().used_percent, 20.0);
-        assert_eq!(snapshot.tertiary.unwrap().used_percent, 50.0);
+        assert_eq!(primary.used_percent, Some(25.0));
+        assert_eq!(primary.resets_at.unwrap().timestamp(), 2_000_000_000);
+        assert_eq!(snapshot.secondary.unwrap().used_percent, Some(20.0));
+        assert_eq!(snapshot.tertiary.unwrap().used_percent, Some(50.0));
         assert_eq!(snapshot.credits, Some(75_000.0));
         assert_eq!(snapshot.plan.as_deref(), Some("Creator"));
     }
@@ -167,7 +170,7 @@ mod tests {
         )
         .unwrap();
         let snapshot = to_snapshot(&sub);
-        assert_eq!(snapshot.primary.unwrap().used_percent, 10.0);
+        assert_eq!(snapshot.primary.unwrap().used_percent, Some(10.0));
         assert!(snapshot.secondary.is_none());
         assert_eq!(snapshot.plan.as_deref(), Some("Starter (past_due)"));
     }
@@ -177,7 +180,7 @@ mod tests {
         let sub: Subscription =
             serde_json::from_str(r#"{"character_count":150,"character_limit":100}"#).unwrap();
         let snapshot = to_snapshot(&sub);
-        assert_eq!(snapshot.primary.unwrap().used_percent, 100.0);
+        assert_eq!(snapshot.primary.unwrap().used_percent, Some(100.0));
         assert_eq!(snapshot.credits, Some(0.0));
     }
 }

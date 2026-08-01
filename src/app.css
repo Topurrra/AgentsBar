@@ -3,8 +3,16 @@
   font-size: 13px;
   color-scheme: dark;
 
+  /* Surfaces. Decision 5: no light theme is built, but every chrome background is a
+     variable now, so adding one later is a @media (prefers-color-scheme: light) block
+     overriding this list rather than a hunt through five components. */
   --bg: #0f0f11;
   --panel: #17171a;
+  --chrome: #131316;
+  --field: #0c0c0e;
+  --track: #26262c;
+  /* Stripe colour for an unknown usage bar. */
+  --hatch: #3a3a42;
   --line: rgba(255, 255, 255, 0.08);
   --text: #e6e6e8;
   --dim: #8b8b94;
@@ -48,7 +56,7 @@ select,
 textarea {
   font: inherit;
   color: var(--text);
-  background: #0c0c0e;
+  background: var(--field);
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 4px 7px;

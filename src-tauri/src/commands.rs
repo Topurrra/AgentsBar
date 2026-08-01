@@ -5,8 +5,8 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::config::{Config, COOKIE_BROWSERS, COOKIE_SOURCES};
 use crate::history::Sample;
-use crate::providers::{all_providers, ProviderInfo, UsageSnapshot};
-use crate::state::AppState;
+use crate::providers::{all_providers, ProviderInfo};
+use crate::state::{AppState, DisplaySnapshot};
 
 #[tauri::command]
 pub async fn list_providers(state: State<'_, AppState>) -> Result<Vec<ProviderInfo>, String> {
@@ -30,8 +30,15 @@ pub async fn list_providers(state: State<'_, AppState>) -> Result<Vec<ProviderIn
 }
 
 #[tauri::command]
-pub async fn get_snapshots(state: State<'_, AppState>) -> Result<Vec<UsageSnapshot>, String> {
-    Ok(state.snapshots_in_order().await)
+pub async fn get_snapshots(state: State<'_, AppState>) -> Result<Vec<DisplaySnapshot>, String> {
+    // Row 25: the same clamped lanes the tray reads, so the tile cannot disagree with it.
+    // Must stay the same shape as the `usage-updated` payload in `scheduler::publish`.
+    Ok(state
+        .snapshots_in_order()
+        .await
+        .iter()
+        .map(DisplaySnapshot::from)
+        .collect())
 }
 
 #[tauri::command]
@@ -195,6 +202,8 @@ pub async fn set_cookie_header(app: AppHandle, id: String, header: String) -> Re
 // ------------------------------------------------------------------ history
 
 #[tauri::command]
-pub async fn get_history(state: State<'_, AppState>) -> Result<HashMap<String, Vec<Sample>>, String> {
+pub async fn get_history(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, Vec<Sample>>, String> {
     Ok(state.history.read().await.series().clone())
 }

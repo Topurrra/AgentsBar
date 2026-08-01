@@ -224,7 +224,7 @@ fn parse_subscription(body: &str) -> Result<(Window, Window), ProviderError> {
     }
     let window = |key: &str| {
         Some(Window {
-            used_percent: scan_field(body, key, "usagePercent")?.clamp(0.0, 100.0),
+            used_percent: scan_field(body, key, "usagePercent")?,
             reset_in_sec: scan_field(body, key, "resetInSec")? as i64,
         })
     };
@@ -239,18 +239,20 @@ fn parse_subscription(body: &str) -> Result<(Window, Window), ProviderError> {
 fn to_snapshot(rolling: &Window, weekly: &Window) -> UsageSnapshot {
     let now = Utc::now();
     let mut snapshot = UsageSnapshot::new("opencode");
-    snapshot.primary = Some(UsageWindow {
-        label: "5-hour".to_string(),
-        used_percent: rolling.used_percent,
-        resets_at: Some(now + Duration::seconds(rolling.reset_in_sec)),
-        window_minutes: Some(5 * 60),
-    });
-    snapshot.secondary = Some(UsageWindow {
-        label: "Weekly".to_string(),
-        used_percent: weekly.used_percent,
-        resets_at: Some(now + Duration::seconds(weekly.reset_in_sec)),
-        window_minutes: Some(7 * 24 * 60),
-    });
+    snapshot.primary = Some(UsageWindow::at(
+        "5-hour",
+        Some(rolling.used_percent),
+        Some(now + Duration::seconds(rolling.reset_in_sec)),
+        Some(5 * 60),
+        now,
+    ));
+    snapshot.secondary = Some(UsageWindow::at(
+        "Weekly",
+        Some(weekly.used_percent),
+        Some(now + Duration::seconds(weekly.reset_in_sec)),
+        Some(7 * 24 * 60),
+        now,
+    ));
     snapshot
 }
 
@@ -297,80 +299,81 @@ impl Provider for OpenCode {
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let cookie = ctx
-            .cookie_header(self.id(), DOMAINS, Want::Any(SESSION_NAMES))
-            .map_err(|e| {
-                ProviderError::Auth(format!(
-                    "no OpenCode session cookie found: {e}. Sign in at opencode.ai, or paste \
-                     a cookie header in Settings"
-                ))
-            })?;
-
-        // TanStack Start routes server functions by id, and echoes it back in a header.
-        let instance = format!("server-fn:{}", Utc::now().timestamp_micros());
-        let common = |referer: &'static str, function_id: &'static str| {
-            [
-                (
-                    "Accept",
-                    "text/javascript, application/json;q=0.9, */*;q=0.8",
-                ),
-                ("Origin", BASE),
-                ("Referer", referer),
-                ("User-Agent", USER_AGENT),
-                ("X-Server-Id", function_id),
-            ]
-        };
-
-        let workspaces = web_get(
-            &ctx.http,
-            &server_url(WORKSPACES_FN, None),
-            &[
-                common(BASE, WORKSPACES_FN).as_slice(),
-                &[
-                    ("X-Server-Instance", instance.as_str()),
-                    ("Cookie", cookie.as_str()),
-                ],
-            ]
-            .concat(),
-            SIGNED_OUT,
+        ctx.with_cookies(
+            self.id(),
+            DOMAINS,
+            Want::Any(SESSION_NAMES),
+            "Sign in at opencode.ai, or paste a cookie header in Settings",
+            |cookie| async move { fetch_with(ctx, &cookie).await },
         )
-        .await?;
-        if looks_signed_out(&workspaces) {
-            return Err(ProviderError::Auth(SIGNED_OUT.to_string()));
-        }
-        let workspace = workspace_ids(&workspaces)
-            .into_iter()
-            .next()
-            .ok_or_else(|| ProviderError::Parse("OpenCode returned no workspace id".into()))?;
-
-        let referer = format!("{BASE}/workspace/{workspace}/billing");
-        let body = web_get(
-            &ctx.http,
-            &server_url(SUBSCRIPTION_FN, Some(&format!("[\"{workspace}\"]"))),
-            &[
-                common(BASE, SUBSCRIPTION_FN).as_slice(),
-                &[
-                    ("Referer", referer.as_str()),
-                    ("X-Server-Instance", instance.as_str()),
-                    ("Cookie", cookie.as_str()),
-                ],
-            ]
-            .concat(),
-            SIGNED_OUT,
-        )
-        .await?;
-        if looks_signed_out(&body) {
-            return Err(ProviderError::Auth(SIGNED_OUT.to_string()));
-        }
-        if body.trim().eq_ignore_ascii_case("null") {
-            return Err(ProviderError::Http(format!(
-                "no OpenCode subscription usage for workspace {workspace}. That workspace \
-                 has no subscription quota data"
-            )));
-        }
-        let (rolling, weekly) = parse_subscription(&body)?;
-        Ok(to_snapshot(&rolling, &weekly))
+        .await
     }
+}
+
+async fn fetch_with(ctx: &FetchContext, cookie: &str) -> Result<UsageSnapshot, ProviderError> {
+    // TanStack Start routes server functions by id, and echoes it back in a header.
+    let instance = format!("server-fn:{}", Utc::now().timestamp_micros());
+    let common = |referer: &'static str, function_id: &'static str| {
+        [
+            (
+                "Accept",
+                "text/javascript, application/json;q=0.9, */*;q=0.8",
+            ),
+            ("Origin", BASE),
+            ("Referer", referer),
+            ("User-Agent", USER_AGENT),
+            ("X-Server-Id", function_id),
+        ]
+    };
+
+    let workspaces = web_get(
+        &ctx.http,
+        &server_url(WORKSPACES_FN, None),
+        &[
+            common(BASE, WORKSPACES_FN).as_slice(),
+            &[("X-Server-Instance", instance.as_str()), ("Cookie", cookie)],
+        ]
+        .concat(),
+        SIGNED_OUT,
+    )
+    .await?;
+    // A signed out session answers 200 with a login page, so this `Auth` is what lets
+    // the walk move on to the next browser.
+    if looks_signed_out(&workspaces) {
+        return Err(ProviderError::Auth(SIGNED_OUT.to_string()));
+    }
+    let workspace = workspace_ids(&workspaces)
+        .into_iter()
+        .next()
+        .ok_or_else(|| ProviderError::Parse("OpenCode returned no workspace id".into()))?;
+
+    let referer = format!("{BASE}/workspace/{workspace}/billing");
+    let body = web_get(
+        &ctx.http,
+        &server_url(SUBSCRIPTION_FN, Some(&format!("[\"{workspace}\"]"))),
+        &[
+            common(BASE, SUBSCRIPTION_FN).as_slice(),
+            &[
+                ("Referer", referer.as_str()),
+                ("X-Server-Instance", instance.as_str()),
+                ("Cookie", cookie),
+            ],
+        ]
+        .concat(),
+        SIGNED_OUT,
+    )
+    .await?;
+    if looks_signed_out(&body) {
+        return Err(ProviderError::Auth(SIGNED_OUT.to_string()));
+    }
+    if body.trim().eq_ignore_ascii_case("null") {
+        return Err(ProviderError::Http(format!(
+            "no OpenCode subscription usage for workspace {workspace}. That workspace \
+                 has no subscription quota data"
+        )));
+    }
+    let (rolling, weekly) = parse_subscription(&body)?;
+    Ok(to_snapshot(&rolling, &weekly))
 }
 
 #[cfg(test)]

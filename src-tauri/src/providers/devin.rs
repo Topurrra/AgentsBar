@@ -153,8 +153,11 @@ fn number(value: Option<&Value>) -> Option<f64> {
 /// Devin mixes fractions and percentages in the same payload, so anything at or below 1
 /// is read as a fraction.
 fn as_percent(raw: f64) -> f64 {
-    let scaled = if raw <= 1.0 { raw * 100.0 } else { raw };
-    scaled.clamp(0.0, 100.0)
+    if raw <= 1.0 {
+        raw * 100.0
+    } else {
+        raw
+    }
 }
 
 fn timestamp(value: Option<&Value>) -> Option<DateTime<Utc>> {
@@ -310,17 +313,10 @@ fn to_snapshot(body: &Value, organization: &str) -> Result<UsageSnapshot, Provid
     }
 
     let mut snapshot = UsageSnapshot::new("devin");
-    snapshot.primary = daily.map(|(used, resets_at)| UsageWindow {
-        label: "Daily".to_string(),
-        used_percent: used,
-        resets_at,
-        window_minutes: Some(24 * 60),
-    });
-    snapshot.secondary = weekly.map(|(used, resets_at)| UsageWindow {
-        label: "Weekly".to_string(),
-        used_percent: used,
-        resets_at,
-        window_minutes: Some(7 * 24 * 60),
+    snapshot.primary = daily
+        .map(|(used, resets_at)| UsageWindow::new("Daily", Some(used), resets_at, Some(24 * 60)));
+    snapshot.secondary = weekly.map(|(used, resets_at)| {
+        UsageWindow::new("Weekly", Some(used), resets_at, Some(7 * 24 * 60))
     });
     snapshot.credits = object.and_then(|o| {
         number(o.get("overage_balance"))
@@ -494,8 +490,8 @@ mod tests {
     #[test]
     fn maps_the_flat_percentage_payload() {
         let body: Value = serde_json::from_str(
-            r#"{"daily_percentage": 0.42, "daily_reset_at": "2026-02-01T00:00:00Z",
-                "weekly_percentage": 61, "weekly_reset_at": 1768507567547,
+            r#"{"daily_percentage": 0.42, "daily_reset_at": "2033-02-01T00:00:00Z",
+                "weekly_percentage": 61, "weekly_reset_at": 2000000000547,
                 "overage_balance_cents": 2500, "plan_name": "team_pro"}"#,
         )
         .unwrap();
@@ -504,13 +500,13 @@ mod tests {
         let primary = snap.primary.unwrap();
         assert_eq!(primary.label, "Daily");
         // A fraction below 1 is a fraction, not 0.42%.
-        assert_eq!(primary.used_percent, 42.0);
+        assert_eq!(primary.used_percent, Some(42.0));
         assert_eq!(primary.window_minutes, Some(24 * 60));
-        assert_eq!(primary.resets_at.unwrap().timestamp(), 1_769_904_000);
+        assert_eq!(primary.resets_at.unwrap().timestamp(), 1_990_828_800);
 
         let secondary = snap.secondary.unwrap();
-        assert_eq!(secondary.used_percent, 61.0);
-        assert_eq!(secondary.resets_at.unwrap().timestamp(), 1_768_507_567);
+        assert_eq!(secondary.used_percent, Some(61.0));
+        assert_eq!(secondary.resets_at.unwrap().timestamp(), 2_000_000_000);
 
         assert_eq!(snap.credits, Some(25.0));
         assert_eq!(snap.plan.as_deref(), Some("Team Pro"));
@@ -520,13 +516,13 @@ mod tests {
     #[test]
     fn falls_back_to_nested_windows_and_computed_ratios() {
         let body: Value = serde_json::from_str(
-            r#"{"quota": {"daily": {"used": 25, "limit": 100, "reset_at": 1768507567},
+            r#"{"quota": {"daily": {"used": 25, "limit": 100, "reset_at": 2000000000},
                           "weekly": {"remaining_percent": 30}}}"#,
         )
         .unwrap();
         let snap = to_snapshot(&body, "organizations/org_1").unwrap();
-        assert_eq!(snap.primary.unwrap().used_percent, 25.0);
-        assert_eq!(snap.secondary.unwrap().used_percent, 70.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(25.0));
+        assert_eq!(snap.secondary.unwrap().used_percent, Some(70.0));
         assert_eq!(snap.account.as_deref(), Some("org_1"));
     }
 
@@ -542,7 +538,7 @@ mod tests {
             serde_json::from_str(r#"{"daily_percentage": "140", "weekly_percentage": -5}"#)
                 .unwrap();
         let snap = to_snapshot(&body, "org/acme").unwrap();
-        assert_eq!(snap.primary.unwrap().used_percent, 100.0);
-        assert_eq!(snap.secondary.unwrap().used_percent, 0.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(100.0));
+        assert_eq!(snap.secondary.unwrap().used_percent, Some(0.0));
     }
 }

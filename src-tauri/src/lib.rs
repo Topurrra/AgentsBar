@@ -7,6 +7,8 @@ pub mod scheduler;
 pub mod state;
 pub mod tray;
 
+mod redact;
+
 use tauri::Manager;
 
 pub fn run() {
@@ -26,9 +28,23 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
+                // Every log line leaves through here, so redaction is a property of the
+                // sink and not of whoever wrote the `log::info!`.
+                .format(|out, message, record| {
+                    out.finish(format_args!(
+                        "[{}][{}][{}] {}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                        record.level(),
+                        record.target(),
+                        redact::redact(&message.to_string())
+                    ))
+                })
                 .build(),
         )
         .setup(|app| {
+            // One line per run, so "the log is empty" means the logger is broken rather
+            // than being indistinguishable from "nothing happened worth logging".
+            log::info!("AgentBar {} starting", env!("CARGO_PKG_VERSION"));
             // A killed or aborted run leaves its cookie database copies behind, and a
             // Firefox copy holds cleartext cookie values. Clear them before anything else.
             cookies::sweep_temp_copies();

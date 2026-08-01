@@ -12,17 +12,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::UsageSnapshot;
 
-/// 24 hours at the default 5 minute refresh. At ~30 bytes per sample and 23 providers
-/// the file stays around 200 kB even fully populated for every provider.
+/// 24 hours at the default 5 minute refresh. At ~36 bytes per sample and 23 providers the
+/// file stays under 250 kB in the worst case, every provider configured and every series
+/// full. A real install has a handful of providers and a fraction of that.
 pub const MAX_SAMPLES: usize = 288;
 
 /// Short field names on purpose: this file is written every refresh.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     /// Unix seconds.
     pub t: i64,
-    /// Used percent of the primary lane, 0..=100.
+    /// Used percent of the lane the tray speaks for, 0..=100.
     pub u: f64,
+    /// Label of the lane `u` was measured against.
+    ///
+    /// Row 17: a weekly series becoming a 5h series is a different quota, so the
+    /// sparkline breaks the line where this changes AND the value jumps, rather than
+    /// drawing a cliff that never happened. The label names whichever lane is currently
+    /// the most constrained, so it also flips when two lanes merely cross at nearly the
+    /// same percentage, and that is not a break worth drawing: `Sparkline.svelte` requires
+    /// both. `None` on samples written before this field existed, and
+    /// `#[serde(default)]` is what lets an existing `history.json` load unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -74,12 +86,13 @@ impl History {
         if snapshot.error.is_some() {
             return false;
         }
-        let Some(used) = lead_used_percent(snapshot) else {
+        let Some((used, lane)) = lead_used_percent(snapshot) else {
             return false;
         };
         let mut sample = Sample {
             t: Utc::now().timestamp(),
             u: used,
+            l: Some(lane),
         };
         let series = self.series.entry(snapshot.provider_id.clone()).or_default();
         // A backwards clock step (NTP correction, resume from sleep) must not push the
@@ -96,6 +109,9 @@ impl History {
         match series.last_mut() {
             Some(last)
                 if (last.u - sample.u).abs() < f64::EPSILON
+                    // A lane change at the same percentage is still a new series, so it
+                    // must not be collapsed into the sample it is meant to break from.
+                    && last.l == sample.l
                     && (0..refresh_secs).contains(&sample.t.saturating_sub(last.t)) =>
             {
                 *last = sample;
@@ -148,14 +164,15 @@ impl History {
     }
 }
 
-/// Same lane the tray speaks for: primary, falling through to secondary then tertiary.
-fn lead_used_percent(snapshot: &UsageSnapshot) -> Option<f64> {
-    snapshot
-        .primary
-        .as_ref()
-        .or(snapshot.secondary.as_ref())
-        .or(snapshot.tertiary.as_ref())
-        .map(|w| w.used_percent.clamp(0.0, 100.0))
+/// The percentage and the lane it belongs to, from the one window the tray speaks for.
+///
+/// It has to be the same call the tray makes, not `primary.or(secondary).or(tertiary)`:
+/// the tray follows the MOST CONSTRAINED lane, so the old fallthrough could plot a
+/// different window from the one the glyph reports. Taking both values from a single
+/// `lead_window` is also what keeps `Sample::l` describing `Sample::u`.
+fn lead_used_percent(snapshot: &UsageSnapshot) -> Option<(f64, String)> {
+    let lead = crate::state::lead_window(snapshot)?;
+    Some((lead.used_percent?, lead.label))
 }
 
 #[cfg(test)]
@@ -165,12 +182,7 @@ mod tests {
 
     fn snapshot(id: &str, used: f64) -> UsageSnapshot {
         let mut s = UsageSnapshot::new(id);
-        s.primary = Some(UsageWindow {
-            label: "5h".into(),
-            used_percent: used,
-            resets_at: None,
-            window_minutes: None,
-        });
+        s.primary = Some(UsageWindow::new("5h", Some(used), None, None));
         s
     }
 
@@ -182,6 +194,43 @@ mod tests {
         assert!(!h.record(&errored, 300));
         assert!(!h.record(&UsageSnapshot::new("codex"), 300));
         assert!(h.series().is_empty());
+    }
+
+    /// Row 17. The series must follow the same lane the tray glyph reports, and carry its
+    /// label, or the sparkline and the tray describe different quotas.
+    #[test]
+    fn the_sample_follows_the_lead_lane_and_names_it() {
+        // The old `primary.or(secondary)` fallthrough would have plotted the 5h at 3%
+        // while the tray glyph showed the weekly at 60%.
+        let mut s = UsageSnapshot::new("codex");
+        s.primary = Some(UsageWindow::new("5h", Some(3.0), None, Some(300)));
+        s.secondary = Some(UsageWindow::new("Weekly", Some(60.0), None, Some(10080)));
+
+        let mut h = History::default();
+        assert!(h.record(&s, 300));
+        let sample = &h.series()["codex"][0];
+        assert_eq!(sample.u, 60.0, "the most constrained lane is the lead lane");
+        assert_eq!(sample.l.as_deref(), Some("Weekly"));
+
+        // A lane change at the same percentage is a different quota, so it appends rather
+        // than collapsing into the sample the sparkline has to break from.
+        s.secondary = None;
+        s.primary = Some(UsageWindow::new("5h", Some(60.0), None, Some(300)));
+        assert!(h.record(&s, 300));
+        let series = &h.series()["codex"];
+        assert_eq!(
+            series.len(),
+            2,
+            "a lane change was collapsed into the last sample"
+        );
+        assert_eq!(series[1].l.as_deref(), Some("5h"));
+    }
+
+    /// An existing history.json predates the lane label and must still load.
+    #[test]
+    fn a_sample_without_a_lane_label_still_parses() {
+        let h = History::parse(r#"{"codex":[{"t":1,"u":5.0}]}"#);
+        assert_eq!(h.series()["codex"][0].l, None);
     }
 
     #[test]
@@ -249,7 +298,9 @@ mod tests {
         assert_eq!(h.series()["codex"][0].u, 100.0);
 
         // Over-long series from a hand-edited file are trimmed on load.
-        let long: Vec<String> = (0..400).map(|i| format!(r#"{{"t":{},"u":1.0}}"#, i + 1)).collect();
+        let long: Vec<String> = (0..400)
+            .map(|i| format!(r#"{{"t":{},"u":1.0}}"#, i + 1))
+            .collect();
         let h = History::parse(&format!(r#"{{"codex":[{}]}}"#, long.join(",")));
         assert_eq!(h.series()["codex"].len(), MAX_SAMPLES);
         assert_eq!(h.series()["codex"][0].t, 400 - MAX_SAMPLES as i64 + 1);
@@ -261,11 +312,14 @@ mod tests {
         for p in crate::providers::all_providers() {
             let mut s = snapshot(p.id(), 1.0);
             for i in 0..MAX_SAMPLES {
-                s.primary.as_mut().unwrap().used_percent = (i % 100) as f64 + 0.25;
+                s.primary.as_mut().unwrap().used_percent = Some((i % 100) as f64 + 0.25);
                 h.record(&s, 0);
             }
         }
+        // Row 17 added the lane label to every sample, which cost about 6 bytes each in
+        // this worst case (23 providers, every series full). Still a rounding error next
+        // to the app's own footprint, and the file is only rewritten once a refresh.
         let bytes = serde_json::to_vec(&h).unwrap().len();
-        assert!(bytes < 200_000, "history.json would be {bytes} bytes");
+        assert!(bytes < 250_000, "history.json would be {bytes} bytes");
     }
 }

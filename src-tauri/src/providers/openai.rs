@@ -100,10 +100,7 @@ struct Amount {
 
 /// Total USD billed over the trailing `HISTORY_DAYS` UTC days.
 async fn fetch_spend(http: &reqwest::Client, key: &str) -> Result<f64, ProviderError> {
-    let today = Utc::now()
-        .date_naive()
-        .and_time(NaiveTime::MIN)
-        .and_utc();
+    let today = Utc::now().date_naive().and_time(NaiveTime::MIN).and_utc();
     let start = (today - Duration::days(HISTORY_DAYS - 1)).timestamp();
     let end = (today + Duration::days(1)).timestamp();
 
@@ -146,11 +143,17 @@ async fn fetch_spend(http: &reqwest::Client, key: &str) -> Result<f64, ProviderE
 
         match (body.has_more, body.next_page) {
             (true, Some(cursor)) if Some(&cursor) != page.as_ref() => page = Some(cursor),
-            (true, _) => return Err(ProviderError::Parse("openai costs pagination stalled".into())),
+            (true, _) => {
+                return Err(ProviderError::Parse(
+                    "openai costs pagination stalled".into(),
+                ))
+            }
             (false, _) => return Ok(total),
         }
     }
-    Err(ProviderError::Parse("openai costs pagination too long".into()))
+    Err(ProviderError::Parse(
+        "openai costs pagination too long".into(),
+    ))
 }
 
 fn sum_costs(body: &CostsResponse) -> f64 {
@@ -208,7 +211,7 @@ async fn fetch_balance(http: &reqwest::Client, key: &str) -> Result<UsageSnapsho
 
 fn balance_snapshot(grants: CreditGrants, now: DateTime<Utc>) -> UsageSnapshot {
     let used_percent = if grants.total_granted > 0.0 {
-        (grants.total_used / grants.total_granted * 100.0).clamp(0.0, 100.0)
+        grants.total_used / grants.total_granted * 100.0
     } else if grants.total_available > 0.0 {
         0.0
     } else {
@@ -224,12 +227,13 @@ fn balance_snapshot(grants: CreditGrants, now: DateTime<Utc>) -> UsageSnapshot {
         .min();
 
     let mut snap = UsageSnapshot::new("openai");
-    snap.primary = Some(UsageWindow {
-        label: "Credits".to_string(),
-        used_percent,
-        resets_at: next_expiry,
-        window_minutes: None,
-    });
+    snap.primary = Some(UsageWindow::at(
+        "Credits",
+        Some(used_percent),
+        next_expiry,
+        None,
+        now,
+    ));
     snap.credits = Some(grants.total_available);
     snap.plan = Some("API credits".to_string());
     snap
@@ -257,7 +261,7 @@ mod tests {
         )
         .unwrap();
         let snap = balance_snapshot(grants, Utc::now());
-        assert_eq!(snap.primary.as_ref().unwrap().used_percent, 25.0);
+        assert_eq!(snap.primary.as_ref().unwrap().used_percent, Some(25.0));
         assert_eq!(snap.credits, Some(75.0));
         assert!(snap.primary.as_ref().unwrap().resets_at.is_some());
     }
@@ -266,7 +270,7 @@ mod tests {
     fn exhausted_balance_without_grants_reads_as_full() {
         let grants: CreditGrants = serde_json::from_str(r#"{}"#).unwrap();
         let snap = balance_snapshot(grants, Utc::now());
-        assert_eq!(snap.primary.as_ref().unwrap().used_percent, 100.0);
+        assert_eq!(snap.primary.as_ref().unwrap().used_percent, Some(100.0));
     }
 
     /// Needs an admin key in the AgentBar config.

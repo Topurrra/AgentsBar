@@ -4,8 +4,9 @@
 //! credentials from `auth.json`, 8-day refresh rule via auth.openai.com, usage from the
 //! ChatGPT backend `wham/usage` endpoint.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -22,6 +23,54 @@ const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 /// CodexBar refreshes when the stored tokens are older than 8 days.
 const REFRESH_AFTER_SECS: i64 = 8 * 24 * 60 * 60;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Row 11. No matter what a credential file says, one provider gets at most one token
+/// rotation per this interval. A file with no `last_refresh` (hand edited, written by an
+/// older CLI, written by a third party login helper) otherwise reads as "refresh now" on
+/// every scheduler tick: 288 rotations a day against the auth service.
+pub(super) const REFRESH_FLOOR: Duration = Duration::from_secs(15 * 60);
+
+/// Per-provider gate for [`REFRESH_FLOOR`]. Records ATTEMPTS, not successes: a refresh
+/// that fails must be throttled exactly like one that works, otherwise a broken token
+/// spins the loop hardest.
+///
+/// ponytail: one `Mutex<Option<Instant>>` per provider static, no registry map. It lives
+/// in this file because `providers/util.rs` belongs to another agent this wave; move it
+/// there if a third OAuth-file provider lands.
+pub(super) struct RefreshFloor(Mutex<Option<Instant>>);
+
+impl RefreshFloor {
+    pub(super) const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// True when a refresh may run now, and books this attempt. False means one ran less
+    /// than [`REFRESH_FLOOR`] ago.
+    pub(super) fn claim(&self) -> bool {
+        self.claim_at(Instant::now())
+    }
+
+    fn claim_at(&self, now: Instant) -> bool {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some_and(|t| now.duration_since(t) < REFRESH_FLOOR) {
+            return false;
+        }
+        *slot = Some(now);
+        true
+    }
+}
+
+static REFRESH_GATE: RefreshFloor = RefreshFloor::new();
+
+/// Row 10. The token endpoint has already invalidated the old refresh token by the time
+/// `save` runs, so the copy we failed to write is the only valid one left. Continuing
+/// would hand the next tick a dead token and the user a CLI re-login.
+fn persist_failed(e: std::io::Error) -> ProviderError {
+    ProviderError::Auth(format!(
+        "the refreshed Codex token could not be written to auth.json ({e}); \
+         close any running Codex CLI and retry, then run codex login if it persists"
+    ))
+}
 
 pub struct Codex;
 
@@ -50,12 +99,12 @@ impl Provider for Codex {
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
         let mut auth = CodexAuth::load()?;
 
-        if auth.needs_refresh() && !auth.refresh_token.is_empty() {
+        // The gate is claimed before the network call, so a refresh that fails is
+        // throttled too. When it denies, we go on with the token we have: the server is
+        // the authority on whether it still works, and a 401 refreshes reactively.
+        if auth.needs_refresh() && !auth.refresh_token.is_empty() && REFRESH_GATE.claim() {
             auth.refresh(&ctx.http).await?;
-            if let Err(e) = auth.save() {
-                // A failed write only costs us an extra refresh next tick.
-                log::warn!("codex: could not persist refreshed tokens: {e}");
-            }
+            auth.save().map_err(persist_failed)?;
         }
 
         let body = fetch_usage(&ctx.http, &auth).await?;
@@ -206,15 +255,33 @@ impl CodexAuth {
         Ok(())
     }
 
-    /// Rewrite auth.json preserving unknown keys. Temp file + rename, like the CLI.
     fn save(&self) -> std::io::Result<()> {
-        let mut root = self.raw.clone();
+        self.save_to(&auth_path())
+    }
+
+    /// Rewrite auth.json preserving unknown keys. Temp file + rename, like the CLI.
+    ///
+    /// The file is re-read HERE rather than reused from `load()`: `self.raw` is a
+    /// snapshot from before the token round trip, and `codex login` may have rewritten
+    /// auth.json in between. Writing the stale copy back restores a refresh token the
+    /// server has already burned. Mirrors `CodexOAuthCredentials.save` in CodexBar.
+    fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        let mut root = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| self.raw.clone());
         if !root.is_object() {
             root = Value::Object(serde_json::Map::new());
         }
         let obj = root.as_object_mut().expect("object");
 
-        let mut tokens = serde_json::Map::new();
+        // Merge into the existing tokens object instead of replacing it: keys the CLI
+        // owns in there and we do not model must survive a refresh.
+        let mut tokens = match obj.get("tokens") {
+            Some(Value::Object(existing)) => existing.clone(),
+            _ => serde_json::Map::new(),
+        };
         tokens.insert(
             "access_token".into(),
             Value::String(self.access_token.clone()),
@@ -235,14 +302,13 @@ impl CodexAuth {
             Value::String(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         );
 
-        let path = auth_path();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = path.with_extension("json.agentbar-tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
         // The staged file holds the tokens, so it must not outlive a failed rename.
-        if let Err(e) = std::fs::rename(&tmp, &path) {
+        if let Err(e) = std::fs::rename(&tmp, path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
@@ -348,8 +414,10 @@ fn normalize_base_url(value: &str) -> String {
 
 #[derive(Deserialize)]
 struct WindowSnapshot {
+    /// Absent means unknown, not zero: a missing percentage used to render as an
+    /// empty, confidently green bar.
     #[serde(default)]
-    used_percent: f64,
+    used_percent: Option<f64>,
     #[serde(default)]
     reset_at: i64,
     #[serde(default)]
@@ -362,14 +430,14 @@ impl WindowSnapshot {
     }
 
     fn into_window(self, label: String) -> UsageWindow {
-        UsageWindow {
+        UsageWindow::new(
             label,
-            used_percent: self.used_percent.clamp(0.0, 100.0),
-            resets_at: (self.reset_at > 0)
+            self.used_percent,
+            (self.reset_at > 0)
                 .then(|| DateTime::from_timestamp(self.reset_at, 0))
                 .flatten(),
-            window_minutes: self.minutes(),
-        }
+            self.minutes(),
+        )
     }
 }
 
@@ -404,16 +472,19 @@ fn map_usage(body: &Value, auth: &CodexAuth) -> UsageSnapshot {
         pair => pair,
     };
 
+    // The label comes from what the API actually reported. A window with no
+    // limit_window_seconds is "Session", never an invented "5h" or "Weekly": a monthly
+    // quota labelled "5h" makes the user plan their day around a reset 29 days out.
     let mut snap = UsageSnapshot::new("codex");
     snap.primary = primary.map(|w| {
-        let label = label_for(w.minutes().or(Some(300)));
+        let label = label_for(w.minutes());
         w.into_window(label)
     });
     snap.secondary = secondary.map(|w| {
-        let label = label_for(w.minutes().or(Some(10080)));
+        let label = label_for(w.minutes());
         w.into_window(label)
     });
-    snap.tertiary = first_additional_window(body);
+    snap.tertiary = additional_window(body);
 
     // A plan without credits still reports "balance": "0"; showing that helps nobody.
     snap.credits = body
@@ -442,25 +513,30 @@ fn map_usage(body: &Value, auth: &CodexAuth) -> UsageSnapshot {
 }
 
 /// `additional_rate_limits` carries model-specific limits (Codex Spark and friends).
-/// The snapshot has one spare lane, so the first usable entry becomes tertiary.
-fn first_additional_window(body: &Value) -> Option<UsageWindow> {
-    for entry in body.get("additional_rate_limits")?.as_array()? {
-        let rate_limit = entry.get("rate_limit");
-        let Some(snapshot) = window_at(rate_limit, "primary_window")
-            .or_else(|| window_at(rate_limit, "secondary_window"))
-        else {
-            continue;
-        };
-        let name = ["limit_name", "metered_feature"]
-            .iter()
-            .filter_map(|k| entry.get(*k).and_then(Value::as_str))
-            .map(str::trim)
-            .find(|s| !s.is_empty())
-            .unwrap_or("Extra limit")
-            .to_string();
-        return Some(snapshot.into_window(name));
-    }
-    None
+/// The snapshot has one spare lane, so exactly one entry can be shown.
+///
+/// The pick is the alphabetically first name, not the first array element: the API is
+/// free to reorder the array between refreshes, and a tertiary lane that silently swaps
+/// identity draws a cliff in the sparkline that never happened.
+fn additional_window(body: &Value) -> Option<UsageWindow> {
+    body.get("additional_rate_limits")?
+        .as_array()?
+        .iter()
+        .filter_map(|entry| {
+            let rate_limit = entry.get("rate_limit");
+            let snapshot = window_at(rate_limit, "primary_window")
+                .or_else(|| window_at(rate_limit, "secondary_window"))?;
+            let name = ["limit_name", "metered_feature"]
+                .iter()
+                .filter_map(|k| entry.get(*k).and_then(Value::as_str))
+                .map(str::trim)
+                .find(|s| !s.is_empty())
+                .unwrap_or("Extra limit")
+                .to_string();
+            Some((name, snapshot))
+        })
+        .min_by(|a, b| a.0.cmp(&b.0))
+        .map(|(name, snapshot)| snapshot.into_window(name))
 }
 
 // MARK: small helpers
@@ -509,8 +585,8 @@ mod tests {
             r#"{
               "plan_type": "pro",
               "rate_limit": {
-                "primary_window": {"used_percent": 42, "reset_at": 1735689600, "limit_window_seconds": 18000},
-                "secondary_window": {"used_percent": 7.5, "reset_at": 1736294400, "limit_window_seconds": 604800}
+                "primary_window": {"used_percent": 42, "reset_at": 2000000000, "limit_window_seconds": 18000},
+                "secondary_window": {"used_percent": 7.5, "reset_at": 2000600000, "limit_window_seconds": 604800}
               },
               "credits": {"has_credits": true, "unlimited": false, "balance": "12.5"},
               "additional_rate_limits": [
@@ -531,13 +607,13 @@ mod tests {
         let snap = map_usage(&body, &auth);
         let primary = snap.primary.unwrap();
         assert_eq!(primary.label, "5h");
-        assert_eq!(primary.used_percent, 42.0);
+        assert_eq!(primary.used_percent, Some(42.0));
         assert_eq!(primary.window_minutes, Some(300));
         assert!(primary.resets_at.is_some());
         assert_eq!(snap.secondary.unwrap().label, "Weekly");
         let extra = snap.tertiary.unwrap();
         assert_eq!(extra.label, "GPT-5.3-Codex-Spark");
-        assert_eq!(extra.used_percent, 100.0); // clamped
+        assert_eq!(extra.used_percent, Some(100.0)); // clamped
         assert_eq!(extra.resets_at, None); // reset_at 0 means unknown
         assert_eq!(snap.credits, Some(12.5));
         assert_eq!(
@@ -568,8 +644,153 @@ mod tests {
             raw: Value::Null,
         };
         let snap = map_usage(&body, &auth);
-        assert_eq!(snap.primary.unwrap().used_percent, 20.0);
-        assert_eq!(snap.secondary.unwrap().used_percent, 10.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(20.0));
+        assert_eq!(snap.secondary.unwrap().used_percent, Some(10.0));
+    }
+
+    /// Row 18. A window the API did not size is "Session", never an invented "5h" or
+    /// "Weekly", and the extra-limit lane does not depend on array order.
+    #[test]
+    fn unsized_windows_keep_a_neutral_label_and_the_extra_lane_is_stable() {
+        let auth = CodexAuth {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            id_token: None,
+            account_id: None,
+            last_refresh: None,
+            raw: Value::Null,
+        };
+        let body: Value = serde_json::from_str(
+            r#"{"rate_limit": {
+                 "primary_window": {"used_percent": 10, "reset_at": 0},
+                 "secondary_window": {"used_percent": 20, "reset_at": 0}}}"#,
+        )
+        .unwrap();
+        let snap = map_usage(&body, &auth);
+        assert_eq!(snap.primary.as_ref().unwrap().label, "Session");
+        assert_eq!(snap.primary.unwrap().window_minutes, None);
+        assert_eq!(snap.secondary.unwrap().label, "Session");
+
+        let one_order: Value = serde_json::from_str(
+            r#"{"additional_rate_limits": [
+                 {"limit_name": "Zeta", "rate_limit": {"primary_window": {"used_percent": 1}}},
+                 {"limit_name": "Alpha", "rate_limit": {"primary_window": {"used_percent": 2}}}]}"#,
+        )
+        .unwrap();
+        let other_order: Value = serde_json::from_str(
+            r#"{"additional_rate_limits": [
+                 {"limit_name": "Alpha", "rate_limit": {"primary_window": {"used_percent": 2}}},
+                 {"limit_name": "Zeta", "rate_limit": {"primary_window": {"used_percent": 1}}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(additional_window(&one_order).unwrap().label, "Alpha");
+        assert_eq!(additional_window(&other_order).unwrap().label, "Alpha");
+
+        // A window the API sent with no percentage at all is unknown, not 0 percent used.
+        let unsized_pct: Value =
+            serde_json::from_str(r#"{"rate_limit": {"primary_window": {"reset_at": 0}}}"#).unwrap();
+        assert_eq!(
+            map_usage(&unsized_pct, &auth).primary.unwrap().used_percent,
+            None
+        );
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("agentbar-codex-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn auth_with(raw: Value) -> CodexAuth {
+        CodexAuth {
+            access_token: "new-access".into(),
+            refresh_token: "new-refresh".into(),
+            id_token: None,
+            account_id: None,
+            last_refresh: None,
+            raw,
+        }
+    }
+
+    /// Row 11. One rotation per window per provider, whatever the credential file says,
+    /// and a denied claim does not slide the window forward.
+    #[test]
+    fn the_refresh_floor_allows_one_attempt_per_window() {
+        let gate = RefreshFloor::new();
+        let t0 = Instant::now();
+        assert!(gate.claim_at(t0), "the first attempt must run");
+        assert!(!gate.claim_at(t0 + Duration::from_secs(5 * 60)));
+        assert!(!gate.claim_at(t0 + REFRESH_FLOOR - Duration::from_secs(1)));
+        assert!(gate.claim_at(t0 + REFRESH_FLOOR), "the window has elapsed");
+        assert!(!gate.claim_at(t0 + REFRESH_FLOOR + Duration::from_secs(1)));
+    }
+
+    /// Row 10. `save` reads auth.json again instead of replaying the copy captured
+    /// before the network call, so a write the CLI made in between survives, and keys
+    /// inside `tokens` that we do not model are merged rather than dropped.
+    #[test]
+    fn save_rereads_the_file_and_merges_unknown_keys() {
+        let path = scratch("save-merge").join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"OPENAI_API_KEY": null,
+                "written_by_the_cli_after_we_loaded": "keep me",
+                "tokens": {"access_token": "old", "refresh_token": "old", "oauth_scope": "keep me too"}}"#,
+        )
+        .unwrap();
+
+        // The stale in-memory copy: it has neither of the CLI's keys.
+        auth_with(serde_json::json!({"tokens": {"access_token": "stale"}}))
+            .save_to(&path)
+            .unwrap();
+
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            back["written_by_the_cli_after_we_loaded"], "keep me",
+            "a key the CLI added during our request window was clobbered"
+        );
+        assert_eq!(back["tokens"]["oauth_scope"], "keep me too");
+        assert_eq!(back["tokens"]["access_token"], "new-access");
+        assert_eq!(back["tokens"]["refresh_token"], "new-refresh");
+        assert!(back["last_refresh"].is_string());
+        assert!(!path.with_extension("json.agentbar-tmp").exists());
+    }
+
+    /// An unreadable or corrupt file falls back to what we loaded, it does not erase.
+    #[test]
+    fn save_falls_back_to_the_loaded_copy_when_the_file_is_unusable() {
+        let path = scratch("save-corrupt").join("auth.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        auth_with(serde_json::json!({"loaded_key": "kept"}))
+            .save_to(&path)
+            .unwrap();
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back["loaded_key"], "kept");
+        assert_eq!(back["tokens"]["access_token"], "new-access");
+    }
+
+    /// Row 10. A write that cannot land is fatal to the refresh: the rotation already
+    /// happened server side, so continuing would hand the next tick a dead token. The
+    /// message must name the fix and must never carry the token.
+    #[test]
+    fn a_failed_write_becomes_a_loud_auth_error() {
+        let blocker = scratch("save-fail").join("not-a-directory");
+        std::fs::write(&blocker, "").unwrap();
+        let path = blocker.join("auth.json");
+
+        let err = auth_with(Value::Null).save_to(&path).unwrap_err();
+        match persist_failed(err) {
+            ProviderError::Auth(msg) => {
+                assert!(msg.contains("codex login"), "{msg}");
+                assert!(
+                    !msg.contains("new-access") && !msg.contains("new-refresh"),
+                    "{msg}"
+                );
+            }
+            other => panic!("a lost credential write must fail the refresh: {other}"),
+        }
+        assert!(!path.exists());
     }
 
     #[test]
@@ -622,7 +843,7 @@ mod tests {
                 ] {
                     if let Some(w) = w {
                         println!(
-                            "codex {lane}: {} used {:.1}% window {:?}m resets {:?}",
+                            "codex {lane}: {} used {:?}% window {:?}m resets {:?}",
                             w.label, w.used_percent, w.window_minutes, w.resets_at
                         );
                     }

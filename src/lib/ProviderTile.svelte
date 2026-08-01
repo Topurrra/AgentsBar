@@ -1,15 +1,23 @@
 <script>
   import { percentLeft, tone, countdown, credits } from "./format.js";
+  import { windowsOf, ago } from "./tiles.js";
   import { providerAccent } from "./icons.js";
   import ProviderIcon from "./ProviderIcon.svelte";
   import Sparkline from "./Sparkline.svelte";
 
-  let { provider, snapshot, samples = [], now, onRetry } = $props();
+  let { provider, snapshot, samples = [], now, staleMs = 600000, onRetry } = $props();
 
-  const windows = $derived(
-    [snapshot?.primary, snapshot?.secondary, snapshot?.tertiary].filter(Boolean),
-  );
+  // Row 25: the backend already applied the cap (an exhausted longer window binds every
+  // shorter one) so the tray and the tile cannot disagree about it.
+  const windows = $derived(windowsOf(snapshot));
   const balance = $derived(credits(snapshot?.credits));
+
+  // Row 20: say how old this tile is once it is past two refresh intervals. Silence
+  // below that, or every tile carries noise.
+  const stale = $derived.by(() => {
+    const t = Date.parse(snapshot?.fetched_at ?? "");
+    return Number.isFinite(t) && now - t > staleMs ? ago(snapshot.fetched_at, now) : "";
+  });
   // 8 digit hex: the brand color at low alpha, no color-mix needed.
   const accentSoft = $derived(providerAccent(provider.id) + "40");
 </script>
@@ -23,6 +31,9 @@
     {#if snapshot?.account}
       <span class="account" title={snapshot.account}>{snapshot.account}</span>
     {/if}
+    {#if stale}
+      <span class="stale" title="Last fetched {snapshot.fetched_at}">{stale}</span>
+    {/if}
     <Sparkline {samples} width={52} height={14} />
   </div>
 
@@ -33,20 +44,36 @@
     </div>
   {/if}
 
+  <!-- Deliberately unkeyed: window labels are derived from the window length and two
+       lanes of the same length share one. Row 36's keying is on provider_id, where the
+       identity is real. -->
   {#each windows as w}
     {@const left = percentLeft(w)}
     <div class="win">
       <div class="winhead">
         <span class="label">{w.label}</span>
         <span class="gap"></span>
-        <span class="pct {tone(left)}">{left === null ? "--" : left + "% left"}</span>
+        <span class="pct {tone(left)}">{left === null ? "unknown" : left + "% left"}</span>
         {#if w.resets_at}
           <span class="reset">{countdown(w.resets_at, now)}</span>
         {/if}
       </div>
-      <div class="track">
-        <div class="fill {tone(left)}" style="width: {left ?? 0}%"></div>
+      <!-- An unknown window fills the track with a hatch, never a zero-width bar that
+           reads as an untouched quota. -->
+      <div
+        class="track"
+        role="progressbar"
+        aria-label="{provider.name} {w.label} remaining"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={left ?? undefined}
+        aria-valuetext={left === null ? "unknown" : left + "% left"}
+      >
+        <div class="fill {tone(left)}" style="width: {left ?? 100}%"></div>
       </div>
+      {#if w.capped_by}
+        <div class="capnote">Capped by {w.capped_by}</div>
+      {/if}
     </div>
   {/each}
 
@@ -179,11 +206,24 @@
     text-align: right;
   }
 
+  .stale {
+    font-size: 10.5px;
+    color: var(--warn);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
   .track {
     height: 5px;
     border-radius: 3px;
-    background: #26262c;
+    background: var(--track);
     overflow: hidden;
+  }
+
+  .capnote {
+    margin-top: 4px;
+    font-size: 10.5px;
+    color: var(--faint);
   }
 
   .fill {
@@ -214,8 +254,13 @@
   .fill.bad {
     background: var(--bad);
   }
+  /* Hatched, not solid: a full flat bar in any colour would read as a measurement. */
   .fill.unknown {
-    background: #3a3a42;
+    background: repeating-linear-gradient(
+      -45deg,
+      var(--hatch) 0 3px,
+      transparent 3px 6px
+    );
   }
 
   .credits {

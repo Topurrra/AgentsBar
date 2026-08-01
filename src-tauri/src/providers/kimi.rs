@@ -86,12 +86,12 @@ fn counts(detail: &Detail) -> Option<(f64, f64, bool)> {
 
 fn window(detail: &Detail, label: &str, minutes: Option<u64>) -> Option<UsageWindow> {
     let (used, limit, reliable) = counts(detail)?;
-    Some(UsageWindow {
-        label: label.to_string(),
-        used_percent: percent(used, limit),
-        resets_at: detail.reset_time.as_deref().and_then(parse_rfc3339),
-        window_minutes: if reliable { minutes } else { None },
-    })
+    Some(UsageWindow::new(
+        label,
+        Some(percent(used, limit)),
+        detail.reset_time.as_deref().and_then(parse_rfc3339),
+        if reliable { minutes } else { None },
+    ))
 }
 
 fn rate_label(minutes: Option<u64>) -> String {
@@ -160,7 +160,7 @@ mod tests {
         "limit": "2048",
         "used": "375",
         "remaining": "1673",
-        "resetTime": "2026-01-09T15:23:13.373329235Z"
+        "resetTime": "2033-01-09T15:23:13.373329235Z"
       },
       "limits": [
         {
@@ -169,7 +169,7 @@ mod tests {
             "limit": "200",
             "used": "19",
             "remaining": "181",
-            "resetTime": "2026-01-06T15:05:24.374187075Z"
+            "resetTime": "2033-01-06T15:05:24.374187075Z"
           }
         }
       ]
@@ -180,12 +180,12 @@ mod tests {
         let parsed: UsageResponse = serde_json::from_str(SAMPLE).unwrap();
         let snapshot = to_snapshot(&parsed);
         let primary = snapshot.primary.unwrap();
-        assert!((primary.used_percent - 18.310_546_875).abs() < 0.001);
+        assert!((primary.used_percent.unwrap() - 18.310_546_875).abs() < 0.001);
         assert_eq!(primary.window_minutes, Some(WEEKLY_WINDOW_MINUTES));
         assert!(primary.resets_at.is_some());
 
         let secondary = snapshot.secondary.unwrap();
-        assert!((secondary.used_percent - 9.5).abs() < 0.001);
+        assert!((secondary.used_percent.unwrap() - 9.5).abs() < 0.001);
         assert_eq!(secondary.window_minutes, Some(300));
         assert_eq!(secondary.label, "5h");
     }
@@ -195,7 +195,7 @@ mod tests {
         let parsed: UsageResponse =
             serde_json::from_str(r#"{"usage":{"limit":2048,"used":512},"limits":null}"#).unwrap();
         let snapshot = to_snapshot(&parsed);
-        assert_eq!(snapshot.primary.unwrap().used_percent, 25.0);
+        assert_eq!(snapshot.primary.unwrap().used_percent, Some(25.0));
         assert!(snapshot.secondary.is_none());
     }
 
@@ -204,7 +204,7 @@ mod tests {
         let parsed: UsageResponse =
             serde_json::from_str(r#"{"usage":{"limit":"100","remaining":"250"}}"#).unwrap();
         let primary = to_snapshot(&parsed).primary.unwrap();
-        assert_eq!(primary.used_percent, 0.0);
+        assert_eq!(primary.used_percent, Some(0.0));
         assert_eq!(primary.window_minutes, None);
     }
 }

@@ -328,14 +328,14 @@ fn decode_plan_info(body: &[u8]) -> Option<String> {
 // ------------------------------------------------------------------ mapping
 
 fn window(label: &str, remaining_percent: u64, reset_at: Option<i64>) -> UsageWindow {
-    UsageWindow {
-        label: label.to_string(),
-        used_percent: (100.0 - remaining_percent as f64).clamp(0.0, 100.0),
-        resets_at: reset_at
+    UsageWindow::new(
+        label,
+        Some(100.0 - remaining_percent as f64),
+        reset_at
             .filter(|secs| *secs > 0)
             .and_then(|secs| Utc.timestamp_opt(secs, 0).single()),
-        window_minutes: None,
-    }
+        None,
+    )
 }
 
 fn snapshot(body: &[u8]) -> Result<UsageSnapshot, ProviderError> {
@@ -411,21 +411,21 @@ mod tests {
 
     #[test]
     fn remaining_percent_becomes_used_percent() {
-        let body = plan_status_response("Pro", 65, 20, 1_785_542_400, 1_786_752_000);
+        let body = plan_status_response("Pro", 65, 20, 2_000_000_000, 2_001_000_000);
         let snap = snapshot(&body).unwrap();
         assert_eq!(snap.plan.as_deref(), Some("Pro"));
         let primary = snap.primary.unwrap();
         assert_eq!(primary.label, "Daily");
-        assert_eq!(primary.used_percent, 35.0);
+        assert_eq!(primary.used_percent, Some(35.0));
         assert_eq!(
             primary.resets_at.map(|d| d.timestamp()),
-            Some(1_785_542_400)
+            Some(2_000_000_000)
         );
         let secondary = snap.secondary.unwrap();
-        assert_eq!(secondary.used_percent, 80.0);
+        assert_eq!(secondary.used_percent, Some(80.0));
         assert_eq!(
             secondary.resets_at.map(|d| d.timestamp()),
-            Some(1_786_752_000)
+            Some(2_001_000_000)
         );
     }
 
@@ -437,7 +437,7 @@ mod tests {
         put_varint(&mut body, 2);
         body.extend_from_slice(b"hi");
         let snap = snapshot(&body).unwrap();
-        assert_eq!(snap.primary.unwrap().used_percent, 0.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(0.0));
         assert!(snap.secondary.unwrap().resets_at.is_none());
     }
 

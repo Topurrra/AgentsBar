@@ -22,6 +22,7 @@ use crate::config::Config;
 const CREDITS_URL: &str = "https://api.manus.im/user.v1.UserService/GetAvailableCredits";
 const DOMAINS: [&str; 1] = ["manus.im"];
 const NAMES: [&str; 1] = ["session_id"];
+const SIGNIN_HINT: &str = "Sign in at manus.im, or paste a cookie header in Settings";
 
 /// Chrome's UA. Manus serves this RPC to its own web app, and a default reqwest UA is
 /// the kind of thing an edge limiter drops.
@@ -66,29 +67,36 @@ impl Provider for Manus {
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let header = ctx.cookie_header(self.id(), &DOMAINS, Want::All(&NAMES))?;
-        let token = session_token(&header).ok_or_else(|| {
-            ProviderError::Auth(
-                "no Manus session_id cookie, sign in at manus.im or paste a cookie header in Settings"
-                    .into(),
-            )
-        })?;
+        ctx.with_cookies(
+            self.id(),
+            &DOMAINS,
+            Want::All(&NAMES),
+            SIGNIN_HINT,
+            |header| async move {
+                let token = session_token(&header).ok_or_else(|| {
+                    ProviderError::Auth(format!("no Manus session_id cookie. {SIGNIN_HINT}"))
+                })?;
 
-        let body: Value = post_json(
-            &ctx.http,
-            CREDITS_URL,
-            &Auth::Bearer(&token),
-            &[
-                ("Origin", "https://manus.im"),
-                ("Referer", "https://manus.im/"),
-                ("Connect-Protocol-Version", "1"),
-                ("User-Agent", USER_AGENT),
-            ],
-            &json!({}),
+                // `post_json` maps 401 and 403 to `Auth`, so a stale session_id from one
+                // browser moves the walk on to the next.
+                let body: Value = post_json(
+                    &ctx.http,
+                    CREDITS_URL,
+                    &Auth::Bearer(&token),
+                    &[
+                        ("Origin", "https://manus.im"),
+                        ("Referer", "https://manus.im/"),
+                        ("Connect-Protocol-Version", "1"),
+                        ("User-Agent", USER_AGENT),
+                    ],
+                    &json!({}),
+                )
+                .await?;
+
+                snapshot(&body, Utc::now())
+            },
         )
-        .await?;
-
-        snapshot(&body, Utc::now())
+        .await
     }
 }
 
@@ -153,20 +161,22 @@ fn snapshot(root: &Value, now: DateTime<Utc>) -> Result<UsageSnapshot, ProviderE
     snap.fetched_at = now;
     snap.credits = Some(number(object, "totalCredits"));
     if pro_monthly > 0.0 {
-        snap.primary = Some(UsageWindow {
-            label: "Monthly credits".into(),
-            used_percent: percent(pro_monthly - periodic, pro_monthly),
-            resets_at: None,
-            window_minutes: None,
-        });
+        snap.primary = Some(UsageWindow::at(
+            "Monthly credits",
+            Some(percent(pro_monthly - periodic, pro_monthly)),
+            None,
+            None,
+            now,
+        ));
     }
     if max_refresh > 0.0 {
-        snap.secondary = Some(UsageWindow {
-            label: "Daily refresh".into(),
-            used_percent: percent(max_refresh - refresh, max_refresh),
-            resets_at: refresh_time(object),
-            window_minutes: None,
-        });
+        snap.secondary = Some(UsageWindow::at(
+            "Daily refresh",
+            Some(percent(max_refresh - refresh, max_refresh)),
+            refresh_time(object),
+            None,
+            now,
+        ));
     }
     snap.plan = object
         .get("refreshInterval")
@@ -213,10 +223,10 @@ mod tests {
         let primary = snap.primary.unwrap();
         assert_eq!(primary.label, "Monthly credits");
         // 6000 granted, 1500 left: 75% used.
-        assert_eq!(primary.used_percent, 75.0);
+        assert_eq!(primary.used_percent, Some(75.0));
         let secondary = snap.secondary.unwrap();
         // 300 max refresh, 100 left.
-        assert!((secondary.used_percent - 200.0 / 3.0).abs() < 1e-9);
+        assert!((secondary.used_percent.unwrap() - 200.0 / 3.0).abs() < 1e-9);
         assert_eq!(
             secondary.resets_at.map(|d| d.timestamp()),
             Some(1_785_585_600)
@@ -234,7 +244,7 @@ mod tests {
             ))
             .unwrap();
             assert_eq!(snap.credits, Some(250.0));
-            assert_eq!(snap.primary.unwrap().used_percent, 75.0);
+            assert_eq!(snap.primary.unwrap().used_percent, Some(75.0));
         }
     }
 
@@ -252,7 +262,7 @@ mod tests {
         )
         .unwrap();
         assert!(snap.primary.is_none());
-        assert_eq!(snap.secondary.unwrap().used_percent, 0.0);
+        assert_eq!(snap.secondary.unwrap().used_percent, Some(0.0));
         assert_eq!(snap.credits, Some(300.0));
     }
 

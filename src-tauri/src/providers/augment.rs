@@ -65,23 +65,25 @@ impl Provider for Augment {
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let jar = ctx
-            .cookie_header(self.id(), &DOMAINS, Want::Jar(&SESSION_NAMES))
-            .map_err(|e| {
-                ProviderError::Auth(format!(
-                    "no Augment session cookie found: {e}. Sign in at app.augmentcode.com, \
-                     or paste a cookie header in Settings"
-                ))
-            })?;
-        let auth = Auth::Header("Cookie", &jar);
+        ctx.with_cookies(
+            self.id(),
+            &DOMAINS,
+            Want::Jar(&SESSION_NAMES),
+            "Sign in at app.augmentcode.com, or paste a cookie header in Settings",
+            |jar| async move {
+                let auth = Auth::Header("Cookie", &jar);
+                // `get_json` maps 401 and 403 to `Auth`, which is what lets the next
+                // browser session be tried.
+                let credits: CreditsResponse = get_json(&ctx.http, CREDITS_URL, &auth, &[]).await?;
+                // The subscription call only adds the plan name, billing cycle and email,
+                // so a failure there must not lose the credits we already have.
+                let subscription: Option<SubscriptionResponse> =
+                    get_json(&ctx.http, SUBSCRIPTION_URL, &auth, &[]).await.ok();
 
-        let credits: CreditsResponse = get_json(&ctx.http, CREDITS_URL, &auth, &[]).await?;
-        // The subscription call only adds the plan name, billing cycle and email, so a
-        // failure there must not lose the credits we already have.
-        let subscription: Option<SubscriptionResponse> =
-            get_json(&ctx.http, SUBSCRIPTION_URL, &auth, &[]).await.ok();
-
-        Ok(snapshot(&credits, subscription.as_ref()))
+                Ok(snapshot(&credits, subscription.as_ref()))
+            },
+        )
+        .await
     }
 }
 
@@ -140,12 +142,12 @@ fn snapshot(
         .and_then(parse_rfc3339);
 
     let mut snap = UsageSnapshot::new("augment");
-    snap.primary = Some(UsageWindow {
-        label: "Credits".into(),
-        used_percent: credits.used_percent(),
+    snap.primary = Some(UsageWindow::new(
+        "Credits",
+        Some(credits.used_percent()),
         resets_at,
-        window_minutes: None,
-    });
+        None,
+    ));
     snap.credits = credits.usage_units_remaining;
     snap.plan = subscription.and_then(|s| s.plan_name.clone());
     snap.account = subscription.and_then(|s| s.email.clone());
@@ -179,7 +181,7 @@ mod tests {
             ),
         );
         let primary = snap.primary.unwrap();
-        assert_eq!(primary.used_percent, 75.0);
+        assert_eq!(primary.used_percent, Some(75.0));
         assert_eq!(
             primary.resets_at.map(|d| d.timestamp()),
             Some(1_788_220_800)
@@ -211,7 +213,7 @@ mod tests {
             None,
         );
         // Only remaining and a limit: 60% used.
-        assert_eq!(snap.primary.unwrap().used_percent, 60.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(60.0));
         assert!(snap.plan.is_none() && snap.account.is_none());
     }
 

@@ -13,8 +13,22 @@
   let { providers, config, onSave, onKeySaved } = $props();
 
   let browsers = $state([]);
+  let query = $state("");
 
   const needsKey = (p) => p.auth === "api_key" || p.auth === "token";
+
+  // Row 16. 23 providers is past the point where a flat alphabetical list is browsable:
+  // the ones you already turned on come first, and the search field is how you find the
+  // rest without scrolling past twenty cards you do not care about.
+  const isOn = (p) => !!config?.providers?.[p.id]?.enabled;
+  const onCount = $derived(providers.filter(isOn).length);
+  const shown = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    const hit = (p) => `${p.name} ${p.id}`.toLowerCase().includes(q);
+    return [...(q ? providers.filter(hit) : providers)].sort(
+      (a, b) => Number(isOn(b)) - Number(isOn(a)),
+    );
+  });
 
   // Devin and Windsurf keep their session in the browser's localStorage (a LevelDB
   // directory), not in the cookie database, so "Auto" can never find them. They get the
@@ -153,13 +167,28 @@
     </div>
   </section>
 
-  <h2>Providers</h2>
+  <div class="secthead">
+    <h2>Providers</h2>
+    <span class="count">{onCount} on</span>
+    <span class="gap"></span>
+    <input
+      class="search"
+      type="search"
+      placeholder="Search"
+      aria-label="Search providers"
+      autocomplete="off"
+      spellcheck="false"
+      bind:value={query}
+    />
+  </div>
 
   {#if !providers.length}
     <p class="hint">No providers registered.</p>
+  {:else if !shown.length}
+    <p class="hint">No provider matches "{query}".</p>
   {/if}
 
-  {#each providers as p (p.id)}
+  {#each shown as p (p.id)}
     {@const e = entry(p.id)}
     {@const cookie = p.auth === "cookie"}
     {@const manual = MANUAL_ONLY[p.id]}
@@ -318,13 +347,32 @@
     padding: 3px 6px;
   }
 
+  .secthead {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 16px 0 6px 0;
+  }
+
   h2 {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.6px;
     color: var(--faint);
     font-weight: 600;
-    margin: 16px 0 6px 2px;
+    margin: 0 0 0 2px;
+  }
+
+  .count {
+    font-size: 11px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .search {
+    width: 118px;
+    font-size: 12px;
+    padding: 3px 7px;
   }
 
   .prov {

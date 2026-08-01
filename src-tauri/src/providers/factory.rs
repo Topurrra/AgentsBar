@@ -187,16 +187,17 @@ impl BillingWindow {
         {
             return 0.0;
         }
-        self.used_percent.clamp(0.0, 100.0)
+        self.used_percent
     }
 
     fn to_window(&self, label: &str, minutes: Option<u64>, now: DateTime<Utc>) -> UsageWindow {
-        UsageWindow {
-            label: label.to_string(),
-            used_percent: self.used_percent(now),
-            resets_at: self.resets_at(now),
-            window_minutes: minutes,
-        }
+        UsageWindow::at(
+            label,
+            Some(self.used_percent(now)),
+            self.resets_at(now),
+            minutes,
+            now,
+        )
     }
 }
 
@@ -293,19 +294,23 @@ fn rate_limit_snapshot(
 }
 
 fn usage_snapshot(auth: &AuthResponse, usage: &UsageResponse) -> UsageSnapshot {
+    let now = Utc::now();
     let data = usage.usage.as_ref();
     let resets_at = data.and_then(|d| d.end_date).and_then(epoch_to_utc);
     // A missing pool counts as an empty one rather than as a missing lane.
-    let lane = |pool: Option<&TokenUsage>, label: &str| UsageWindow {
-        label: label.to_string(),
-        used_percent: usage_percent(
-            pool.and_then(|p| p.user_tokens).unwrap_or(0),
-            pool.and_then(|p| p.total_allowance).unwrap_or(0),
-            pool.and_then(|p| p.used_ratio),
-        ),
-        resets_at,
-        // The billing period has no fixed duration, only an end.
-        window_minutes: None,
+    let lane = |pool: Option<&TokenUsage>, label: &str| {
+        UsageWindow::at(
+            label,
+            Some(usage_percent(
+                pool.and_then(|p| p.user_tokens).unwrap_or(0),
+                pool.and_then(|p| p.total_allowance).unwrap_or(0),
+                pool.and_then(|p| p.used_ratio),
+            )),
+            resets_at,
+            // The billing period has no fixed duration, only an end.
+            None,
+            now,
+        )
     };
 
     let mut snapshot = UsageSnapshot::new("factory");
@@ -432,27 +437,42 @@ impl Provider for Factory {
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        if let Ok(cookie) = ctx.cookie_header(self.id(), DOMAINS, Want::Jar(SESSION_NAMES)) {
-            // app.factory.ai serves the session cookie; api.factory.ai answers the same
-            // routes and is the one that works for some org configurations.
-            let first = fetch_with(ctx, APP, ("Cookie", cookie.as_str())).await;
-            if first.is_ok() {
-                return first;
-            }
-            if let Ok(snapshot) = fetch_with(ctx, API, ("Cookie", cookie.as_str())).await {
-                return Ok(snapshot);
-            }
-            return first;
+        // Same gate as before: only the ABSENCE of a Factory cookie falls through to
+        // WorkOS. A cookie that exists but fails is still a Factory failure, and now the
+        // walk gets to try every browser that holds one before giving up.
+        if super::has_cookies(&ctx.config, self.id(), DOMAINS, Want::Jar(SESSION_NAMES)) {
+            return ctx
+                .with_cookies(
+                    self.id(),
+                    DOMAINS,
+                    Want::Jar(SESSION_NAMES),
+                    SIGNIN_HINT,
+                    |cookie| async move {
+                        // app.factory.ai serves the session cookie; api.factory.ai answers
+                        // the same routes and is the one that works for some org configs.
+                        let first = fetch_with(ctx, APP, ("Cookie", cookie.as_str())).await;
+                        if first.is_ok() {
+                            return first;
+                        }
+                        if let Ok(snapshot) =
+                            fetch_with(ctx, API, ("Cookie", cookie.as_str())).await
+                        {
+                            return Ok(snapshot);
+                        }
+                        first
+                    },
+                )
+                .await;
         }
 
-        // No Factory cookie: the browser may still hold the WorkOS session that Factory
-        // signs in through.
+        // No Factory cookie at all: the browser may still hold the WorkOS session that
+        // Factory signs in through. That one stays on the single-candidate shim, because
+        // the WorkOS cookie is exchanged for a bearer token rather than sent as a session.
         let workos = ctx
             .cookie_header(self.id(), WORKOS_DOMAINS, Want::Jar(WORKOS_NAMES))
             .map_err(|e| {
                 ProviderError::Auth(format!(
-                    "no Factory session cookie found: {e}. Sign in at app.factory.ai, or \
-                     paste a cookie header in Settings"
+                    "no Factory session cookie found: {e}. {SIGNIN_HINT}"
                 ))
             })?;
         let bearer = format!("Bearer {}", workos_bearer(ctx, &workos).await?);
@@ -507,11 +527,11 @@ mod tests {
 
         let primary = snap.primary.unwrap();
         assert_eq!(primary.label, "5h");
-        assert_eq!(primary.used_percent, 12.0);
+        assert_eq!(primary.used_percent, Some(12.0));
         assert_eq!(primary.window_minutes, Some(300));
         // secondsRemaining drives the countdown.
         assert!(primary.resets_at.unwrap() > Utc::now());
-        assert_eq!(snap.secondary.unwrap().used_percent, 34.0);
+        assert_eq!(snap.secondary.unwrap().used_percent, Some(34.0));
         let tertiary = snap.tertiary.unwrap();
         assert_eq!(tertiary.label, "Monthly");
         assert_eq!(tertiary.window_minutes, None);
@@ -543,7 +563,7 @@ mod tests {
     #[test]
     fn maps_the_period_token_counters() {
         let usage: UsageResponse = serde_json::from_str(
-            r#"{"usage": {"endDate": 1768507567547,
+            r#"{"usage": {"endDate": 2000000000547,
                 "standard": {"userTokens": 100, "totalAllowance": 1000},
                 "premium": {"userTokens": 30, "totalAllowance": 200}},
                 "userId": "user-1"}"#,
@@ -552,17 +572,17 @@ mod tests {
         let snap = usage_snapshot(&auth(), &usage);
         let primary = snap.primary.unwrap();
         assert_eq!(primary.label, "Standard");
-        assert_eq!(primary.used_percent, 10.0);
+        assert_eq!(primary.used_percent, Some(10.0));
         assert_eq!(primary.window_minutes, None);
-        assert_eq!(primary.resets_at.unwrap().timestamp(), 1_768_507_567);
-        assert_eq!(snap.secondary.unwrap().used_percent, 15.0);
+        assert_eq!(primary.resets_at.unwrap().timestamp(), 2_000_000_000);
+        assert_eq!(snap.secondary.unwrap().used_percent, Some(15.0));
     }
 
     #[test]
     fn missing_pools_read_as_empty_lanes() {
         let snap = usage_snapshot(&auth(), &UsageResponse::default());
-        assert_eq!(snap.primary.unwrap().used_percent, 0.0);
-        assert_eq!(snap.secondary.unwrap().used_percent, 0.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(0.0));
+        assert_eq!(snap.secondary.unwrap().used_percent, Some(0.0));
     }
 
     #[test]

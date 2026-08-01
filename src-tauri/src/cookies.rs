@@ -39,7 +39,19 @@ const DOMAIN_HASH_LEN: usize = 32;
 /// of hours and `is_configured` is called on every popover open, so without this the tray
 /// would copy and decrypt four cookie databases per provider per open. Config writes call
 /// [`invalidate`] so a settings change is never stale.
-const CACHE_TTL: Duration = Duration::from_secs(300);
+///
+/// This MUST stay well above the refresh cadence (`Config::refresh_minutes`, default 5).
+/// At 300 s it equalled the default interval, so the cache expired on essentially every
+/// tick and ten cookie providers re-copied and re-decrypted four SQLite databases before
+/// the first HTTP request. Session cookies change on the order of days, so 30 minutes is
+/// still far more responsive than the data.
+const CACHE_TTL: Duration = Duration::from_secs(1800);
+/// How long a FAILED scan is remembered. A locked or busy cookie database is a transient
+/// condition the user fixes by closing the browser, so it must not be memoized for the
+/// full [`CACHE_TTL`]: that would keep a live session invisible for half an hour after the
+/// cause was gone. Short enough to recover on the next refresh, long enough that ten
+/// providers sharing one broken profile still only scan it once.
+const ERROR_TTL: Duration = Duration::from_secs(30);
 /// File name prefix of the working copies, also what [`sweep_temp_copies`] looks for.
 const TEMP_PREFIX: &str = "agentbar-cookies-";
 
@@ -102,6 +114,13 @@ const CHROMIUM_ROOTS: [(&str, &str, &str); 3] = [
 /// Every installed browser profile that actually has a cookie database, in the order
 /// `cookie_source = "auto"` tries them: Chrome, Edge, Brave, Firefox.
 pub fn detect_browsers() -> Vec<BrowserProfile> {
+    // Row 39: a test run must not copy and decrypt the developer's live browser sessions
+    // into the test output or a CI log. This is the only producer of a `BrowserProfile`,
+    // and every read path reaches the disk through one, so the single guard covers them
+    // all. The two `#[ignore]`d tests below opt in explicitly.
+    if cfg!(test) && std::env::var("AGENTBAR_ALLOW_TEST_COOKIE_ACCESS").as_deref() != Ok("1") {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     if let Some(local) = dirs::data_local_dir() {
         for (id, label, rel) in CHROMIUM_ROOTS {
@@ -159,7 +178,11 @@ fn chromium_profiles(root: &Path) -> Vec<(PathBuf, String)> {
         .into_iter()
         .filter(|(_, name)| name == "Default" || name.starts_with("Profile "))
         .collect();
-    dirs.sort_by(|a, b| (a.1 != "Default").cmp(&(b.1 != "Default")).then(a.1.cmp(&b.1)));
+    dirs.sort_by(|a, b| {
+        (a.1 != "Default")
+            .cmp(&(b.1 != "Default"))
+            .then(a.1.cmp(&b.1))
+    });
     dirs
 }
 
@@ -357,7 +380,11 @@ fn host_matches(host: &str, suffixes: &[&str]) -> bool {
 }
 
 fn filetime_to_utc(micros: i64) -> Option<DateTime<Utc>> {
-    unix_to_utc(micros.checked_div(1_000_000)?.checked_sub(FILETIME_EPOCH_OFFSET)?)
+    unix_to_utc(
+        micros
+            .checked_div(1_000_000)?
+            .checked_sub(FILETIME_EPOCH_OFFSET)?,
+    )
 }
 
 fn unix_to_utc(secs: i64) -> Option<DateTime<Utc>> {
@@ -450,8 +477,7 @@ impl TempCopy {
     fn of(src: &Path) -> Result<Self, CookieError> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir()
-            .join(format!("{TEMP_PREFIX}{}-{n}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("{TEMP_PREFIX}{}-{n}.db", std::process::id()));
         // Deliberately not std::fs::copy: that is CopyFileExW, which opens the source
         // denying concurrent writers, so it fails with a sharing violation while the
         // browser is running. A plain File::open shares read, write and delete, which is
@@ -559,15 +585,36 @@ static SCANS: Mutex<Option<HashMap<String, (Instant, Cached)>>> = Mutex::new(Non
 /// Detection walks the filesystem, and `is_configured` runs for every provider on every
 /// popover open, so the profile list rides the same TTL.
 static PROFILES: Mutex<Option<(Instant, Vec<BrowserProfile>)>> = Mutex::new(None);
+/// The browser whose session a provider's API last accepted, keyed by provider id. Only
+/// an ordering hint: [`candidates`] still returns the others behind it.
+static WINNERS: Mutex<Option<HashMap<String, &'static str>>> = Mutex::new(None);
 
-/// Drop the memoized scans and the detected profile list. Called whenever the cookie
-/// config changes.
+/// Drop the memoized scans, the detected profile list and the winning browser hints.
+/// Called whenever the cookie config changes.
 pub fn invalidate() {
     if let Ok(mut c) = SCANS.lock() {
         *c = None;
     }
     if let Ok(mut p) = PROFILES.lock() {
         *p = None;
+    }
+    if let Ok(mut w) = WINNERS.lock() {
+        *w = None;
+    }
+}
+
+/// Run blocking cookie work (SQLite copy, DPAPI unwrap) without stalling the runtime.
+///
+/// ponytail: `block_in_place` rather than `spawn_blocking` because every caller here is
+/// sync (`Provider::is_configured` is a sync trait method) and the arguments borrow, so
+/// `spawn_blocking` would force an owned `Config`, an owned domain list and an owned
+/// `Want` on ten providers we do not own. Off a multi-thread runtime (unit tests, the
+/// startup sweep) `block_in_place` would panic, so there it is just a direct call.
+fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
     }
 }
 
@@ -591,15 +638,27 @@ fn detected() -> Vec<BrowserProfile> {
 fn scan_cached(profile: &BrowserProfile, domains: &[&str]) -> Cached {
     let key = format!("{}|{}", profile.cookies_db.display(), domains.join(","));
     let Ok(mut guard) = SCANS.lock() else {
-        return scan(profile, domains).map(Arc::new).map_err(|e| e.to_string());
+        return scan(profile, domains)
+            .map(Arc::new)
+            .map_err(|e| e.to_string());
     };
     let map = guard.get_or_insert_with(HashMap::new);
     if let Some((at, value)) = map.get(&key) {
-        if at.elapsed() <= CACHE_TTL {
+        // A FAILED scan gets a much shorter life than a good one. The common failure is
+        // "the browser is running and holds its cookie database open", which clears the
+        // moment the user closes it: memoizing that for the full TTL would keep the
+        // provider unconfigured, drop it out of `ready`, and let the scheduler prune the
+        // last good snapshot, leaving "No session found" for half an hour after the cause
+        // was gone. Session cookies still change on the order of days, so only the error
+        // path pays for the retry.
+        let ttl = if value.is_ok() { CACHE_TTL } else { ERROR_TTL };
+        if at.elapsed() <= ttl {
             return value.clone();
         }
     }
-    let value = scan(profile, domains).map(Arc::new).map_err(|e| e.to_string());
+    let value = scan(profile, domains)
+        .map(Arc::new)
+        .map_err(|e| e.to_string());
     map.insert(key, (Instant::now(), value.clone()));
     value
 }
@@ -618,7 +677,12 @@ fn no_match(found: &Scan, label: &str, domains: &[&str], what: String) -> String
 }
 
 /// The `name=value` pairs `want` asks for, or a message naming what is missing.
-fn pairs_for(found: &Scan, want: Want, label: &str, domains: &[&str]) -> Result<Vec<String>, String> {
+fn pairs_for(
+    found: &Scan,
+    want: Want,
+    label: &str,
+    domains: &[&str],
+) -> Result<Vec<String>, String> {
     let now = Utc::now();
     let unexpired = |c: &&Cookie| c.expires.map_or(true, |e| e > now);
     let live = |name: &str| {
@@ -679,21 +743,73 @@ fn pairs_for(found: &Scan, want: Want, label: &str, domains: &[&str]) -> Result<
     }
 }
 
-/// The `Cookie` header for `provider_id`, honouring its configured source.
+/// One browser session that satisfies `want`, ready to be tried at fetch time.
+///
+/// Holding the cookie names is not proof the session is alive: a logged out Chrome and a
+/// signed in Edge look identical on disk. Only the provider's API can tell them apart, so
+/// [`candidates`] returns all of them and the caller walks the list, moving on when a
+/// request comes back auth shaped. See `Docs/notes3-cookies.md` for the walk.
+///
+/// No `Debug`, no `Serialize`, and the header is private: it is a secret that belongs in
+/// a request header and nowhere else.
+#[derive(Clone)]
+pub struct Candidate {
+    /// Stable browser id, matching `ProviderConfig::cookie_browser`. `manual` for a
+    /// pasted header.
+    pub browser: &'static str,
+    /// Human label for messages, for example `Edge (Profile 1)`.
+    pub label: String,
+    header: String,
+}
+
+impl Candidate {
+    /// The `Cookie` header value. Put it straight into a request header.
+    pub fn header(&self) -> &str {
+        &self.header
+    }
+
+    /// Synthetic candidate for tests in other modules, which cannot reach the private
+    /// header field. Never built from a real cookie.
+    #[cfg(test)]
+    pub fn synthetic(browser: &'static str, header: &str) -> Self {
+        Self {
+            browser,
+            label: browser.to_string(),
+            header: header.to_string(),
+        }
+    }
+}
+
+/// Remember which browser the provider's API actually accepted, so the next refresh
+/// starts there instead of walking the failed ones again.
+pub fn remember(provider_id: &str, winner: &Candidate) {
+    let Ok(mut guard) = WINNERS.lock() else {
+        return;
+    };
+    let map = guard.get_or_insert_with(HashMap::new);
+    if map.insert(provider_id.to_string(), winner.browser) != Some(winner.browser) {
+        log::info!(
+            "{provider_id}: cookie session from {} accepted",
+            winner.label
+        );
+    }
+}
+
+/// Every browser session that could serve `provider_id`, best first.
 ///
 /// - `off`: always an error.
-/// - `manual`: the stored header verbatim, and only then. A header left over from an
-///   earlier manual setup must never shadow the browser once the user switches to auto.
-/// - `auto`: the pinned browser, else every detected browser in order Chrome, Edge,
-///   Brave, Firefox, taking the first that satisfies `want`.
+/// - `manual`: the stored header verbatim, as the only candidate. A header left over from
+///   an earlier manual setup must never shadow the browser once the user switches to auto.
+/// - `auto`: the pinned browser alone, else every detected browser that satisfies `want`,
+///   ordered last winner first, then Chrome, Edge, Brave, Firefox.
 ///
-/// The returned string is a secret: put it straight into a request header.
-pub fn resolve(
+/// Never returns an empty `Ok`.
+pub fn candidates(
     config: &Config,
     provider_id: &str,
     domains: &[&str],
     want: Want,
-) -> Result<String, CookieError> {
+) -> Result<Vec<Candidate>, CookieError> {
     match config.cookie_source(provider_id) {
         "off" => {
             return Err(CookieError::Missing(format!(
@@ -703,7 +819,13 @@ pub fn resolve(
         "manual" => {
             return config
                 .cookie_header(provider_id)
-                .map(str::to_string)
+                .map(|header| {
+                    vec![Candidate {
+                        browser: "manual",
+                        label: "the pasted header".to_string(),
+                        header: header.to_string(),
+                    }]
+                })
                 .ok_or_else(|| {
                     CookieError::Missing(format!(
                         "{provider_id} is set to a manual cookie header but none is saved"
@@ -712,48 +834,93 @@ pub fn resolve(
         }
         _ => {}
     }
+    off_runtime(|| auto_candidates(config, provider_id, domains, want))
+}
 
-    let wanted = config.cookie_browser(provider_id);
+fn auto_candidates(
+    config: &Config,
+    provider_id: &str,
+    domains: &[&str],
+    want: Want,
+) -> Result<Vec<Candidate>, CookieError> {
+    let pinned = config.cookie_browser(provider_id);
     let all = detected();
     if all.is_empty() {
         return Err(CookieError::NoBrowser);
     }
-    // A pinned browser is used exclusively, so the failure names that browser.
-    let candidates: Vec<&BrowserProfile> = match wanted {
-        Some(id) => all.iter().filter(|p| p.browser == id).collect(),
-        None => all.iter().collect(),
-    };
-    if candidates.is_empty() {
+    let winner = WINNERS
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref()?.get(provider_id).copied());
+    let profiles = ordered(&all, pinned, winner);
+    if profiles.is_empty() {
         return Err(CookieError::Missing(format!(
             "{} is selected for {provider_id} but is not installed",
-            wanted.unwrap_or("that browser")
+            pinned.unwrap_or("that browser")
         )));
     }
 
+    let mut out = Vec::new();
     let mut last = None;
-    for profile in candidates {
-        let attempt = scan_cached(profile, domains)
-            .and_then(|found| pairs_for(&found, want, &profile.label, domains));
-        match attempt {
-            Ok(parts) => {
-                log::info!(
-                    "{provider_id}: using {} cookie(s) from {}",
-                    parts.len(),
-                    profile.label
-                );
-                return Ok(parts.join("; "));
-            }
+    for profile in profiles {
+        match scan_cached(profile, domains)
+            .and_then(|found| pairs_for(&found, want, &profile.label, domains))
+        {
+            Ok(parts) => out.push(Candidate {
+                browser: profile.browser,
+                label: profile.label.clone(),
+                header: parts.join("; "),
+            }),
             // Both a failed scan and an unsatisfied `want` already carry a message that
             // names browsers and cookie names only.
             Err(message) => last = Some(CookieError::Missing(message)),
         }
     }
-    Err(last.unwrap_or(CookieError::NoBrowser))
+    if out.is_empty() {
+        return Err(last.unwrap_or(CookieError::NoBrowser));
+    }
+    Ok(out)
+}
+
+/// A pinned browser is used exclusively, so a failure can name it. Otherwise the last
+/// accepted browser leads and the detection order (Chrome, Edge, Brave, Firefox) follows.
+fn ordered<'a>(
+    all: &'a [BrowserProfile],
+    pinned: Option<&str>,
+    winner: Option<&str>,
+) -> Vec<&'a BrowserProfile> {
+    let mut out: Vec<&BrowserProfile> = match pinned {
+        Some(id) => all.iter().filter(|p| p.browser == id).collect(),
+        None => all.iter().collect(),
+    };
+    if let Some(w) = winner {
+        // Stable, so profiles of the winning browser keep their relative order.
+        out.sort_by_key(|p| p.browser != w);
+    }
+    out
+}
+
+/// The `Cookie` header of the first candidate.
+///
+/// ponytail: a shim for callers that still make a single attempt. Prefer [`candidates`]
+/// plus [`remember`]: this one cannot recover from a logged out session that merely holds
+/// the right cookie names.
+pub fn resolve(
+    config: &Config,
+    provider_id: &str,
+    domains: &[&str],
+    want: Want,
+) -> Result<String, CookieError> {
+    candidates(config, provider_id, domains, want)?
+        .into_iter()
+        .next()
+        .map(|c| c.header)
+        .ok_or(CookieError::NoBrowser)
 }
 
 /// Cheap enough for `is_configured`: everything but the first scan is memoized.
 pub fn available(config: &Config, provider_id: &str, domains: &[&str], want: Want) -> bool {
-    resolve(config, provider_id, domains, want).is_ok()
+    candidates(config, provider_id, domains, want).is_ok()
 }
 
 #[cfg(test)]
@@ -845,7 +1012,10 @@ mod tests {
         assert!(host_matches("www.cursor.com", &["cursor.com"]));
         assert!(!host_matches("notcursor.com", &["cursor.com"]));
         assert!(!host_matches("cursor.com.evil.io", &["cursor.com"]));
-        assert!(host_matches("api.factory.ai", &["app.devin.ai", "factory.ai"]));
+        assert!(host_matches(
+            "api.factory.ai",
+            &["app.devin.ai", "factory.ai"]
+        ));
     }
 
     #[test]
@@ -927,10 +1097,162 @@ mod tests {
         assert!(header(&found, Want::Any(&["session"])).is_err());
     }
 
+    /// The memo statics are process wide, so the tests that seed or clear them take turns.
+    /// `into_inner` because a panic in one of them must not cascade into the others.
+    static TEST_GLOBALS: Mutex<()> = Mutex::new(());
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        TEST_GLOBALS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn fake_profile(browser: &'static str, label: &str) -> BrowserProfile {
+        BrowserProfile {
+            browser,
+            label: label.to_string(),
+            // Deliberately absent from disk: any real read must fail loudly.
+            cookies_db: PathBuf::from(format!(r"Z:\agentbar-no-such-profile\{label}\Cookies")),
+            kind: BrowserKind::Firefox,
+        }
+    }
+
+    /// A logged out Chrome holds the same cookie NAMES as a signed in Edge, so discovery
+    /// cannot tell them apart. Once a fetch proves Edge works, Edge must lead.
+    #[test]
+    fn candidate_order_puts_the_last_accepted_browser_first() {
+        let all = vec![
+            fake_profile("chrome", "Chrome"),
+            fake_profile("chrome", "Chrome (Profile 1)"),
+            fake_profile("edge", "Edge"),
+            fake_profile("firefox", "Firefox"),
+        ];
+        let labels = |v: Vec<&BrowserProfile>| -> Vec<String> {
+            v.iter().map(|p| p.label.clone()).collect()
+        };
+
+        assert_eq!(
+            labels(ordered(&all, None, None)),
+            ["Chrome", "Chrome (Profile 1)", "Edge", "Firefox"]
+        );
+        assert_eq!(
+            labels(ordered(&all, None, Some("edge"))),
+            ["Edge", "Chrome", "Chrome (Profile 1)", "Firefox"]
+        );
+        // Both Chrome profiles keep their relative order behind the winner.
+        assert_eq!(
+            labels(ordered(&all, None, Some("chrome"))),
+            ["Chrome", "Chrome (Profile 1)", "Edge", "Firefox"]
+        );
+        // A pinned browser is exclusive, and a stale hint cannot resurrect the others.
+        assert_eq!(
+            labels(ordered(&all, Some("chrome"), Some("edge"))),
+            ["Chrome", "Chrome (Profile 1)"]
+        );
+        assert!(ordered(&all, Some("brave"), None).is_empty());
+    }
+
+    #[test]
+    fn the_accepted_browser_is_remembered_per_provider() {
+        let _lock = exclusive();
+        remember(
+            "cursor",
+            &Candidate {
+                browser: "edge",
+                label: "Edge".to_string(),
+                header: "synthetic".to_string(),
+            },
+        );
+        let hint = WINNERS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|m| m.get("cursor").copied());
+        assert_eq!(hint, Some("edge"));
+        invalidate();
+        assert!(WINNERS.lock().unwrap().is_none());
+    }
+
+    /// Row 9: at 300 s the TTL equalled the default refresh interval, so every tick paid
+    /// for a fresh copy and DPAPI decrypt of every cookie database.
+    #[test]
+    fn a_cached_scan_survives_the_refresh_cadence() {
+        let _lock = exclusive();
+        assert!(CACHE_TTL >= Duration::from_secs(1800));
+        assert!(CACHE_TTL > Duration::from_secs(Config::default().refresh_minutes * 60));
+
+        let profile = fake_profile("firefox", "TTL Probe");
+        let key = format!("{}|example.com", profile.cookies_db.display());
+        let seed = |at: Instant| {
+            SCANS
+                .lock()
+                .unwrap()
+                .get_or_insert_with(HashMap::new)
+                .insert(key.clone(), (at, Ok(Arc::new(jar(&["session"])))));
+        };
+
+        // The database does not exist, so anything but a cache hit is an error.
+        seed(Instant::now());
+        let found = scan_cached(&profile, &["example.com"]).expect("cache expired within the TTL");
+        assert_eq!(found.cookies.len(), 1);
+
+        // ... and the TTL is what is holding it, not permanence.
+        if let Some(stale) = Instant::now().checked_sub(CACHE_TTL + Duration::from_secs(1)) {
+            seed(stale);
+            assert!(scan_cached(&profile, &["example.com"]).is_err());
+        }
+        if let Ok(mut guard) = SCANS.lock() {
+            if let Some(map) = guard.as_mut() {
+                map.remove(&key);
+            }
+        }
+    }
+
+    /// A failed scan must not ride the 30 minute TTL. "The browser is running and holds
+    /// its cookie database open" is fixed by closing the browser, and memoizing it for
+    /// half an hour drops the provider out of `ready` long after the cause is gone.
+    #[test]
+    fn a_failed_scan_is_retried_long_before_a_good_one_expires() {
+        let _lock = exclusive();
+        assert!(ERROR_TTL < CACHE_TTL);
+        assert!(ERROR_TTL <= Duration::from_secs(Config::default().refresh_minutes * 60));
+
+        let profile = fake_profile("firefox", "Error TTL Probe");
+        let key = format!("{}|example.com", profile.cookies_db.display());
+        let seed = |at: Instant| {
+            SCANS
+                .lock()
+                .unwrap()
+                .get_or_insert_with(HashMap::new)
+                .insert(key.clone(), (at, Err("browser was busy".to_string())));
+        };
+
+        // Inside the error TTL the memoized failure still answers.
+        seed(Instant::now());
+        assert_eq!(
+            scan_cached(&profile, &["example.com"]).err().unwrap(),
+            "browser was busy"
+        );
+
+        // Past it, the profile is scanned again. The database still does not exist, so
+        // the retry fails too, but with the real error rather than the cached one.
+        if let Some(stale) = Instant::now().checked_sub(ERROR_TTL + Duration::from_secs(1)) {
+            seed(stale);
+            assert_ne!(
+                scan_cached(&profile, &["example.com"]).err().unwrap(),
+                "browser was busy",
+                "a stale failure was served instead of being retried"
+            );
+        }
+        if let Ok(mut guard) = SCANS.lock() {
+            if let Some(map) = guard.as_mut() {
+                map.remove(&key);
+            }
+        }
+    }
+
     /// A header pasted while the provider was on `manual` must not keep answering once
     /// the user switches back to `auto` and signs in again in the browser.
     #[test]
     fn a_saved_manual_header_never_answers_in_auto_or_off_mode() {
+        let _lock = exclusive();
         // Pretend no browser is installed, so the auto branch is deterministic and this
         // test never reads the real cookie databases.
         *PROFILES.lock().unwrap() = Some((Instant::now(), Vec::new()));
@@ -966,7 +1288,7 @@ mod tests {
     /// What one cold popover open costs: `is_configured` for every provider, which is
     /// every cookie provider probing its own domains against every detected browser.
     /// Prints timings only, never a cookie.
-    /// Run with: cargo test -- --ignored --nocapture cold_probe
+    /// Run with: AGENTBAR_ALLOW_TEST_COOKIE_ACCESS=1 cargo test -- --ignored --nocapture cold_probe
     #[test]
     #[ignore = "touches the real browser profiles on this machine"]
     fn cold_probe_of_every_provider_stays_quick() {
@@ -990,7 +1312,7 @@ mod tests {
 
     /// Proof against this machine's real browsers. Prints browser names, cookie NAMES and
     /// counts only. Never a value, never a length that could leak one.
-    /// Run with: cargo test -- --ignored --nocapture
+    /// Run with: AGENTBAR_ALLOW_TEST_COOKIE_ACCESS=1 cargo test -- --ignored --nocapture
     #[test]
     #[ignore = "touches the real browser profiles on this machine"]
     fn real_browsers_decrypt() {
@@ -1056,6 +1378,9 @@ mod tests {
                 }
             );
         }
-        assert!(decrypted_any, "no browser yielded a single decrypted cookie");
+        assert!(
+            decrypted_any,
+            "no browser yielded a single decrypted cookie"
+        );
     }
 }

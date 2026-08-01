@@ -92,32 +92,26 @@ fn timestamp(raw: Option<f64>) -> Option<DateTime<Utc>> {
     epoch_to_utc(value as i64)
 }
 
-fn clamp(raw: Option<f64>) -> f64 {
-    raw.filter(|v| v.is_finite())
-        .unwrap_or(0.0)
-        .clamp(0.0, 100.0)
-}
-
 fn to_snapshot(data: &CustomerData) -> UsageSnapshot {
     let mut snapshot = UsageSnapshot::new("t3chat");
-    snapshot.primary = Some(UsageWindow {
-        label: "Base".to_string(),
-        used_percent: clamp(data.four_hour_percent),
-        resets_at: timestamp(data.four_hour_reset).or_else(|| timestamp(data.window_reset)),
-        window_minutes: Some(4 * 60),
-    });
-    snapshot.secondary = Some(UsageWindow {
-        label: "Overage".to_string(),
-        used_percent: clamp(data.month_percent.or(data.period_percent)),
+    snapshot.primary = Some(UsageWindow::new(
+        "Base",
+        data.four_hour_percent,
+        timestamp(data.four_hour_reset).or_else(|| timestamp(data.window_reset)),
+        Some(4 * 60),
+    ));
+    snapshot.secondary = Some(UsageWindow::new(
+        "Overage",
+        data.month_percent.or(data.period_percent),
         // billingNextResetAt tracks the usage window, not the overage period, so an
         // unknown subscription period end stays unknown rather than borrowing it.
-        resets_at: timestamp(
+        timestamp(
             data.subscription
                 .as_ref()
                 .and_then(|s| s.current_period_end),
         ),
-        window_minutes: None,
-    });
+        None,
+    ));
     snapshot.plan = plan_name(data);
     snapshot
 }
@@ -187,46 +181,50 @@ impl Provider for T3Chat {
     }
 
     async fn fetch(&self, ctx: &FetchContext) -> Result<UsageSnapshot, ProviderError> {
-        let cookie = ctx
-            .cookie_header(self.id(), DOMAINS, Want::Jar(SESSION_NAMES))
-            .map_err(|e| {
-                ProviderError::Auth(format!(
-                    "no T3 Chat session cookie found: {e}. Sign in at t3.chat, or paste a \
-                     cookie header in Settings"
-                ))
-            })?;
-        // T3 Chat sits behind Vercel's bot mitigation, which reads the browser fingerprint
-        // headers as well as the cookie, so the whole captured set travels with the call.
-        let headers = [
-            ("Accept", "*/*"),
-            ("Accept-Language", "en-US,en;q=0.9"),
-            ("Cache-Control", "no-cache"),
-            ("Pragma", "no-cache"),
-            ("Priority", "u=4"),
-            ("Referer", REFERER),
-            ("Origin", BASE),
-            ("Sec-Fetch-Dest", "empty"),
-            ("Sec-Fetch-Mode", "cors"),
-            ("Sec-Fetch-Site", "same-origin"),
-            ("trpc-accept", "application/jsonl"),
-            ("x-trpc-batch", "true"),
-            ("x-trpc-source", "web-client"),
-            ("User-Agent", USER_AGENT),
-            ("Cookie", cookie.as_str()),
-        ];
-        let url = format!(
-            "{BASE}/api/trpc/getCustomerData?batch=1&input={}",
-            urlencode(INPUT)
-        );
-        let body = web_get(
-            &ctx.http,
-            &url,
-            &headers,
-            "T3 Chat session cookie is invalid or expired. Sign in again at t3.chat",
+        ctx.with_cookies(
+            self.id(),
+            DOMAINS,
+            Want::Jar(SESSION_NAMES),
+            "Sign in at t3.chat, or paste a cookie header in Settings",
+            |cookie| async move { fetch_with(ctx, &cookie).await },
         )
-        .await?;
-        Ok(to_snapshot(&parse_jsonl(&body)?))
+        .await
     }
+}
+
+async fn fetch_with(ctx: &FetchContext, cookie: &str) -> Result<UsageSnapshot, ProviderError> {
+    // T3 Chat sits behind Vercel's bot mitigation, which reads the browser fingerprint
+    // headers as well as the cookie, so the whole captured set travels with the call.
+    let headers = [
+        ("Accept", "*/*"),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Cache-Control", "no-cache"),
+        ("Pragma", "no-cache"),
+        ("Priority", "u=4"),
+        ("Referer", REFERER),
+        ("Origin", BASE),
+        ("Sec-Fetch-Dest", "empty"),
+        ("Sec-Fetch-Mode", "cors"),
+        ("Sec-Fetch-Site", "same-origin"),
+        ("trpc-accept", "application/jsonl"),
+        ("x-trpc-batch", "true"),
+        ("x-trpc-source", "web-client"),
+        ("User-Agent", USER_AGENT),
+        ("Cookie", cookie),
+    ];
+    let url = format!(
+        "{BASE}/api/trpc/getCustomerData?batch=1&input={}",
+        urlencode(INPUT)
+    );
+    // `web_get` maps 401 and 403 to `Auth`, which is what lets the next browser be tried.
+    let body = web_get(
+        &ctx.http,
+        &url,
+        &headers,
+        "T3 Chat session cookie is invalid or expired. Sign in again at t3.chat",
+    )
+    .await?;
+    Ok(to_snapshot(&parse_jsonl(&body)?))
 }
 
 #[cfg(test)]
@@ -240,8 +238,8 @@ mod tests {
         "\n",
         r#"{"json":[[0,0,[{"result":{"data":{"subTier":"pro-plus","usageBand":"high","#,
         r#""usageFourHourPercentage":42.5,"usageMonthPercentage":88,"#,
-        r#""usageFourHourNextResetAt":1768507567547,"#,
-        r#""subscription":{"productName":"pro-plus","currentPeriodEnd":1771099567547}}}}]]]}"#,
+        r#""usageFourHourNextResetAt":2000000000547,"#,
+        r#""subscription":{"productName":"pro-plus","currentPeriodEnd":2000900000547}}}}]]]}"#,
     );
 
     #[test]
@@ -251,15 +249,15 @@ mod tests {
 
         let primary = snap.primary.unwrap();
         assert_eq!(primary.label, "Base");
-        assert_eq!(primary.used_percent, 42.5);
+        assert_eq!(primary.used_percent, Some(42.5));
         assert_eq!(primary.window_minutes, Some(240));
-        assert_eq!(primary.resets_at.unwrap().timestamp(), 1_768_507_567);
+        assert_eq!(primary.resets_at.unwrap().timestamp(), 2_000_000_000);
 
         let secondary = snap.secondary.unwrap();
         assert_eq!(secondary.label, "Overage");
-        assert_eq!(secondary.used_percent, 88.0);
+        assert_eq!(secondary.used_percent, Some(88.0));
         assert_eq!(secondary.window_minutes, None);
-        assert_eq!(secondary.resets_at.unwrap().timestamp(), 1_771_099_567);
+        assert_eq!(secondary.resets_at.unwrap().timestamp(), 2_000_900_000);
 
         assert_eq!(snap.plan.as_deref(), Some("Pro Plus"));
     }
@@ -269,7 +267,7 @@ mod tests {
         let data =
             parse_jsonl(r#"{"usageFourHourPercentage":10,"usagePeriodPercentage":60}"#).unwrap();
         let snap = to_snapshot(&data);
-        assert_eq!(snap.secondary.unwrap().used_percent, 60.0);
+        assert_eq!(snap.secondary.unwrap().used_percent, Some(60.0));
         assert!(snap.primary.unwrap().resets_at.is_none());
         assert_eq!(snap.plan, None);
     }
@@ -277,15 +275,17 @@ mod tests {
     #[test]
     fn window_reset_backs_the_four_hour_reset_and_percentages_clamp() {
         let data =
-            parse_jsonl(r#"{"usageMonthPercentage":140,"usageWindowNextResetAt":1768507567547}"#)
+            parse_jsonl(r#"{"usageMonthPercentage":140,"usageWindowNextResetAt":2000000000547}"#)
                 .unwrap();
         let snap = to_snapshot(&data);
-        assert_eq!(snap.primary.as_ref().unwrap().used_percent, 0.0);
+        // The payload carries no four-hour percentage, so the base lane is UNKNOWN.
+        // It used to read as a confident 0 percent used.
+        assert_eq!(snap.primary.as_ref().unwrap().used_percent, None);
         assert_eq!(
             snap.primary.unwrap().resets_at.unwrap().timestamp(),
-            1_768_507_567
+            2_000_000_000
         );
-        assert_eq!(snap.secondary.unwrap().used_percent, 100.0);
+        assert_eq!(snap.secondary.unwrap().used_percent, Some(100.0));
     }
 
     #[test]

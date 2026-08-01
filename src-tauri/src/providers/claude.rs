@@ -4,13 +4,14 @@
 //! credentials from `.credentials.json`, refresh against platform.claude.com, usage and
 //! profile from the Anthropic OAuth endpoints.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use super::codex::RefreshFloor;
 use super::{AuthKind, FetchContext, Provider, ProviderError, UsageSnapshot, UsageWindow};
 use crate::config::Config;
 
@@ -21,6 +22,28 @@ const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const BETA_HEADER: &str = "oauth-2025-04-20";
 const USER_AGENT: &str = "claude-code/2.1.0";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Row 11. A `.credentials.json` with no `expiresAt` reads as expired forever, which
+/// without this gate rotates the refresh token on every scheduler tick. See
+/// [`super::codex::REFRESH_FLOOR`] for the interval.
+static REFRESH_GATE: RefreshFloor = RefreshFloor::new();
+
+/// Row 10. Anthropic rotates the refresh token on every refresh, so the token we failed
+/// to write is the only live one: dropping it silently is what forced CodexBar users
+/// back through `claude login` (their issues #1161 and #1239).
+fn persist_failed(e: std::io::Error) -> ProviderError {
+    ProviderError::Auth(format!(
+        "the refreshed Claude token could not be written to .credentials.json ({e}); \
+         close any running Claude CLI and retry, then run claude login if it persists"
+    ))
+}
+
+/// Row 11 gate. Only a credentials file with NO `expiresAt` is throttled by the shared
+/// floor: that one reads as expired forever. A stated expiry that has passed is a fact,
+/// and gating it would let a single dropped connection cost 15 minutes of blank tile.
+fn may_refresh(expires_at: Option<DateTime<Utc>>, gate: &RefreshFloor) -> bool {
+    expires_at.is_some() || gate.claim()
+}
 
 pub struct Claude;
 
@@ -55,9 +78,20 @@ impl Provider for Claude {
                     "Claude token expired and no refresh token, run claude login".into(),
                 ));
             }
-            creds.refresh(&ctx.http).await?;
-            if let Err(e) = creds.save() {
-                log::warn!("claude: could not persist refreshed tokens: {e}");
+            // Row 11's floor exists for a file with NO expiresAt, which reads as expired
+            // on every tick and would otherwise rotate the token 288 times a day. A real
+            // expiry that has passed is a fact, not a guess, so it refreshes every tick.
+            //
+            // The gate books the ATTEMPT, so gating a known expiry would spend the floor
+            // on one dropped connection: the next 15 minutes of ticks would then skip the
+            // refresh and send a token the file itself calls dead, which 401s into an
+            // `Auth` error, and scheduler::merge clears every window on `Auth`. One lost
+            // packet would blank the tile for 15 minutes and tell the user to run
+            // `claude login`. Letting a transport failure surface as `Http` keeps the last
+            // good numbers and retries on the next tick instead.
+            if may_refresh(creds.expires_at, &REFRESH_GATE) {
+                creds.refresh(&ctx.http).await?;
+                creds.save().map_err(persist_failed)?;
             }
         }
 
@@ -158,10 +192,14 @@ impl ClaudeCredentials {
                     "Claude refresh token rejected, run claude login".into(),
                 ));
             }
-            return Err(ProviderError::Auth(format!(
-                "Claude token refresh failed with HTTP {}",
-                status.as_u16()
-            )));
+            // Only a refusal is an auth problem. A 429 or a 5xx is the token service
+            // having a moment, and `Auth` would clear every window (row 2) and tell the
+            // user to run `claude login` over a blank tile.
+            let msg = format!("Claude token refresh failed with HTTP {}", status.as_u16());
+            return Err(match status.as_u16() {
+                400 | 401 | 403 => ProviderError::Auth(msg),
+                _ => ProviderError::Http(msg),
+            });
         }
 
         let json: Value = serde_json::from_str(&text)
@@ -180,9 +218,21 @@ impl ClaudeCredentials {
         Ok(())
     }
 
-    /// Rewrite .credentials.json preserving every other key. Temp file + rename.
     fn save(&self) -> std::io::Result<()> {
-        let mut root = self.raw.clone();
+        self.save_to(&credentials_path())
+    }
+
+    /// Rewrite .credentials.json preserving every other key. Temp file + rename.
+    ///
+    /// The file is re-read HERE rather than reused from `load()`: `self.raw` predates
+    /// the token round trip, and the Claude CLI may have rewritten the file (including
+    /// its own rotated token, or an mcpOAuth entry) while we were on the network.
+    fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        let mut root = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| self.raw.clone());
         if !root.is_object() {
             root = Value::Object(serde_json::Map::new());
         }
@@ -206,14 +256,13 @@ impl ClaudeCredentials {
             oauth.insert("expiresAt".into(), Value::from(at.timestamp_millis()));
         }
 
-        let path = credentials_path();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = path.with_extension("json.agentbar-tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
         // The staged file holds the tokens, so it must not outlive a failed rename.
-        if let Err(e) = std::fs::rename(&tmp, &path) {
+        if let Err(e) = std::fs::rename(&tmp, path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
@@ -342,16 +391,15 @@ fn map_usage(body: &Value) -> UsageSnapshot {
 fn window(body: &Value, key: &str, label: &str, minutes: u64) -> Option<UsageWindow> {
     let raw = body.get(key)?;
     let used = raw.get("utilization").and_then(Value::as_f64)?;
-    Some(UsageWindow {
-        label: label.to_string(),
-        used_percent: used.clamp(0.0, 100.0),
-        resets_at: raw
-            .get("resets_at")
+    Some(UsageWindow::new(
+        label,
+        Some(used),
+        raw.get("resets_at")
             .and_then(Value::as_str)
             .and_then(|s| DateTime::parse_from_rfc3339(s.trim()).ok())
             .map(|d| d.with_timezone(&Utc)),
-        window_minutes: Some(minutes),
-    })
+        Some(minutes),
+    ))
 }
 
 fn string_at(value: &Value, key: &str) -> Option<String> {
@@ -370,8 +418,8 @@ mod tests {
     fn maps_five_hour_seven_day_and_opus() {
         let body: Value = serde_json::from_str(
             r#"{
-              "five_hour": {"utilization": 37.5, "resets_at": "2026-08-01T14:30:00Z"},
-              "seven_day": {"utilization": 120, "resets_at": "2026-08-05T00:00:00.000Z"},
+              "five_hour": {"utilization": 37.5, "resets_at": "2033-05-18T14:30:00Z"},
+              "seven_day": {"utilization": 120, "resets_at": "2033-05-20T00:00:00.000Z"},
               "seven_day_opus": {"utilization": 4}
             }"#,
         )
@@ -380,20 +428,133 @@ mod tests {
         let p = snap.primary.unwrap();
         assert_eq!(
             (p.label.as_str(), p.used_percent, p.window_minutes),
-            ("5h", 37.5, Some(300))
+            ("5h", Some(37.5), Some(300))
         );
         assert!(p.resets_at.is_some());
         let s = snap.secondary.unwrap();
-        assert_eq!(s.used_percent, 100.0); // clamped
+        assert_eq!(s.used_percent, Some(100.0)); // clamped
         assert!(s.resets_at.is_some()); // fractional seconds parse too
         let t = snap.tertiary.unwrap();
         assert_eq!((t.label.as_str(), t.resets_at), ("Opus weekly", None));
+    }
+
+    /// Proof that the mapper builds through `UsageWindow::new`: a reset that has
+    /// already happened is dropped rather than shown as an expired countdown.
+    #[test]
+    fn an_elapsed_reset_does_not_survive_the_constructor() {
+        let snap = map_usage(&serde_json::json!({
+            "five_hour": {"utilization": 10, "resets_at": "2020-01-01T00:00:00Z"}
+        }));
+        assert_eq!(snap.primary.unwrap().resets_at, None);
     }
 
     #[test]
     fn missing_windows_stay_none() {
         let snap = map_usage(&serde_json::json!({"five_hour": {"resets_at": "bogus"}}));
         assert!(snap.primary.is_none() && snap.secondary.is_none() && snap.tertiary.is_none());
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("agentbar-claude-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn creds_with(raw: Value) -> ClaudeCredentials {
+        ClaudeCredentials {
+            access_token: "new-access".into(),
+            refresh_token: Some("new-refresh".into()),
+            expires_at: DateTime::from_timestamp_millis(1_900_000_000_000),
+            subscription_type: None,
+            rate_limit_tier: None,
+            raw,
+        }
+    }
+
+    /// Row 10. `save` reads .credentials.json again instead of replaying the copy taken
+    /// before the network call, so an mcpOAuth entry the CLI wrote in between survives.
+    #[test]
+    fn save_rereads_the_file_and_keeps_other_keys() {
+        let path = scratch("save-merge").join(".credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpOAuth": {"written_after_we_loaded": true},
+                "claudeAiOauth": {"accessToken": "old", "subscriptionType": "max", "scopes": ["a"]}}"#,
+        )
+        .unwrap();
+
+        creds_with(serde_json::json!({"claudeAiOauth": {"accessToken": "stale"}}))
+            .save_to(&path)
+            .unwrap();
+
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            back["mcpOAuth"]["written_after_we_loaded"], true,
+            "a key the CLI added during our request window was clobbered"
+        );
+        let oauth = &back["claudeAiOauth"];
+        assert_eq!(oauth["accessToken"], "new-access");
+        assert_eq!(oauth["refreshToken"], "new-refresh");
+        assert_eq!(oauth["subscriptionType"], "max");
+        assert_eq!(oauth["scopes"][0], "a");
+        assert_eq!(oauth["expiresAt"], 1_900_000_000_000i64);
+        assert!(!path.with_extension("json.agentbar-tmp").exists());
+    }
+
+    /// Row 10. A lost write fails the refresh loudly: Anthropic rotated the refresh
+    /// token already, so silence here costs the user a `claude login`.
+    #[test]
+    fn a_failed_write_becomes_a_loud_auth_error() {
+        let blocker = scratch("save-fail").join("not-a-directory");
+        std::fs::write(&blocker, "").unwrap();
+        let path = blocker.join(".credentials.json");
+
+        let err = creds_with(Value::Null).save_to(&path).unwrap_err();
+        match persist_failed(err) {
+            ProviderError::Auth(msg) => {
+                assert!(msg.contains("claude login"), "{msg}");
+                assert!(
+                    !msg.contains("new-access") && !msg.contains("new-refresh"),
+                    "{msg}"
+                );
+            }
+            other => panic!("a lost credential write must fail the refresh: {other}"),
+        }
+        assert!(!path.exists());
+    }
+
+    /// Row 11. A credentials file with no `expiresAt` reads as expired forever; the
+    /// shared floor is what stops that from rotating the token every tick.
+    #[test]
+    fn a_missing_expiry_still_reads_as_expired_but_the_floor_gates_it() {
+        let creds = ClaudeCredentials {
+            expires_at: None,
+            ..creds_with(Value::Null)
+        };
+        assert!(creds.is_expired());
+        let gate = RefreshFloor::new();
+        assert!(may_refresh(None, &gate));
+        assert!(
+            !may_refresh(None, &gate),
+            "a second tick must not rotate the token again"
+        );
+    }
+
+    /// The other half of row 11: a STATED expiry that has passed is not the case the
+    /// floor was written for. Gating it would spend the floor on one dropped connection,
+    /// and the next 15 minutes of ticks would send a token the file calls dead, which
+    /// 401s into an `Auth` error that clears the tile.
+    #[test]
+    fn a_known_expiry_is_refreshed_every_tick_not_once_per_floor() {
+        let gate = RefreshFloor::new();
+        let expiry = DateTime::from_timestamp_millis(1_000_000_000_000);
+        for _ in 0..3 {
+            assert!(may_refresh(expiry, &gate));
+        }
+        // ... and doing so never books the floor away from the no-expiry case.
+        assert!(may_refresh(None, &gate));
     }
 
     #[test]
@@ -443,7 +604,7 @@ mod tests {
                 ] {
                     if let Some(w) = w {
                         println!(
-                            "claude {lane}: {} used {:.1}% window {:?}m resets {:?}",
+                            "claude {lane}: {} used {:?}% window {:?}m resets {:?}",
                             w.label, w.used_percent, w.window_minutes, w.resets_at
                         );
                     }

@@ -1,6 +1,7 @@
 <script>
   import ProviderTile from "./ProviderTile.svelte";
-  import { clockTime, lastRefresh } from "./format.js";
+  import { clockTime } from "./format.js";
+  import { sortTiles, oldestFetch } from "./tiles.js";
 
   let {
     providers,
@@ -9,6 +10,8 @@
     now,
     ready,
     refreshing,
+    staleMs = 600000,
+    pinned = null,
     onRefresh,
     onRetry,
     onSettings,
@@ -16,18 +19,26 @@
   } = $props();
 
   const byId = $derived(new Map(snapshots.map((s) => [s.provider_id, s])));
-  const refreshed = $derived(clockTime(lastRefresh(snapshots)));
+
+  // Row 15: most urgent first, so the reason you opened the popover is above the fold.
+  const tiles = $derived(sortTiles(providers, byId, pinned));
+
+  // Row 20: the stamp is the oldest of the snapshots actually on screen. A single
+  // provider still refreshing must not let the footer claim the rest are current.
+  const shown = $derived(providers.map((p) => byId.get(p.id)).filter(Boolean));
+  const refreshed = $derived(clockTime(oldestFetch(shown)));
 </script>
 
 <div class="scroll">
   {#if providers.length}
     <div class="tiles">
-      {#each providers as p (p.id)}
+      {#each tiles as p (p.id)}
         <ProviderTile
           provider={p}
           snapshot={byId.get(p.id)}
           samples={history[p.id] ?? []}
           {now}
+          {staleMs}
           {onRetry}
         />
       {/each}
@@ -42,7 +53,7 @@
 </div>
 
 <footer>
-  <span class="stamp">Updated {refreshed}</span>
+  <span class="stamp" title="Oldest snapshot on screen">Updated {refreshed}</span>
   <span class="gap"></span>
 
   <button
@@ -120,7 +131,7 @@
     flex: none;
     padding: 6px 8px;
     border-top: 1px solid var(--line);
-    background: #131316;
+    background: var(--chrome);
   }
 
   .stamp {

@@ -12,7 +12,7 @@ use tauri_plugin_positioner::{Position, WindowExt};
 
 use crate::config::Config;
 use crate::providers::{all_providers, UsageSnapshot};
-use crate::state::AppState;
+use crate::state::{lead_window, AppState, DisplayWindow};
 
 pub const TRAY_ID: &str = "agentbar-tray";
 
@@ -48,7 +48,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let _ = STARTUP_ITEM.set(startup);
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(render_icon(None))
+        .icon(render_icon(&Glyph::blank()))
         .tooltip("AgentBar")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -200,38 +200,104 @@ pub fn update(app: &AppHandle, snapshots: &[UsageSnapshot], config: &Config) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
-    let _ = tray.set_icon(Some(render_icon(pinned_remaining(snapshots, config))));
+    let _ = tray.set_icon(Some(render_icon(&glyph(snapshots, config))));
     let _ = tray.set_tooltip(Some(tooltip(snapshots)));
     // Picks up a theme switch by the next redraw without blocking this one.
     refresh_taskbar_theme();
 }
 
-/// The window the tray speaks for. Not every provider fills `primary`: Codex on a Pro
-/// plan reports only a weekly window, so fall through instead of showing "--" on data.
-fn lead_window(snapshot: &UsageSnapshot) -> Option<&crate::providers::UsageWindow> {
-    snapshot
-        .primary
-        .as_ref()
-        .or(snapshot.secondary.as_ref())
-        .or(snapshot.tertiary.as_ref())
+/// What the 32x32 canvas has to say. The icon and the tooltip both come from
+/// [`lead_window`], so they cannot name different windows.
+struct Glyph {
+    text: String,
+    /// Percent remaining, for the underline colour only.
+    remaining: Option<f64>,
+    /// The number is the last good one, not a live one: draw it faded.
+    dim: bool,
 }
 
-fn remaining(snapshot: &UsageSnapshot) -> Option<f64> {
-    lead_window(snapshot).map(|w| (100.0 - w.used_percent).clamp(0.0, 100.0))
-}
-
-/// Pinned provider if it has data, otherwise the first provider with data.
-fn pinned_remaining(snapshots: &[UsageSnapshot], config: &Config) -> Option<f64> {
-    if let Some(id) = config.pinned_provider.as_deref() {
-        if let Some(v) = snapshots
-            .iter()
-            .find(|s| s.provider_id == id)
-            .and_then(remaining)
-        {
-            return Some(v);
+impl Glyph {
+    /// No data at all.
+    fn blank() -> Self {
+        Self {
+            text: "--".to_string(),
+            remaining: None,
+            dim: false,
         }
     }
-    snapshots.iter().find_map(remaining)
+}
+
+/// The snapshot and window the tray speaks for: the pinned provider when it has a usable
+/// number, otherwise the first provider that does.
+fn lead<'a>(
+    snapshots: &'a [UsageSnapshot],
+    config: &Config,
+) -> Option<(&'a UsageSnapshot, DisplayWindow)> {
+    let usable = |s: &'a UsageSnapshot| {
+        lead_window(s)
+            .filter(|w| w.used_percent.is_some())
+            .map(|w| (s, w))
+    };
+    config
+        .pinned_provider
+        .as_deref()
+        .and_then(|id| {
+            snapshots
+                .iter()
+                .find(|s| s.provider_id == id)
+                .and_then(usable)
+        })
+        .or_else(|| snapshots.iter().find_map(usable))
+}
+
+fn glyph(snapshots: &[UsageSnapshot], config: &Config) -> Glyph {
+    let Some((snapshot, window)) = lead(snapshots, config) else {
+        return Glyph::blank();
+    };
+    let remaining = window.used_percent.map(|u| 100.0 - u);
+    // A tray reading 0 tells you nothing you can act on; one reading 2h does.
+    let text = match remaining {
+        Some(left) if left <= 0.0 => window
+            .resets_at
+            .and_then(|at| countdown(at, chrono::Utc::now()))
+            .unwrap_or_else(|| "0".to_string()),
+        Some(left) => format!("{}", left.round() as i64),
+        None => "--".to_string(),
+    };
+    Glyph {
+        text,
+        remaining,
+        dim: is_stale(snapshot, config),
+    }
+}
+
+/// Three refresh intervals without a successful fetch, or an error on the last one.
+/// Either way the number on the icon is history and must not look live.
+fn is_stale(snapshot: &UsageSnapshot, config: &Config) -> bool {
+    if snapshot.error.is_some() {
+        return true;
+    }
+    let limit = config.refresh_minutes.max(1).saturating_mul(60 * 3) as i64;
+    (chrono::Utc::now() - snapshot.fetched_at).num_seconds() > limit
+}
+
+/// Coarse time to a future instant in two or three glyphs: `3d`, `2h`, `34m`.
+/// Truncates, so it never promises a shorter wait than the real one.
+fn countdown(
+    at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let secs = (at - now).num_seconds();
+    if secs <= 0 {
+        return None;
+    }
+    Some(if secs >= 86_400 {
+        format!("{}d", secs / 86_400)
+    } else if secs >= 3_600 {
+        format!("{}h", secs / 3_600)
+    } else {
+        format!("{}m", (secs / 60).max(1))
+    })
 }
 
 fn tooltip(snapshots: &[UsageSnapshot]) -> String {
@@ -243,14 +309,20 @@ fn tooltip(snapshots: &[UsageSnapshot]) -> String {
             .find(|(id, _)| *id == snap.provider_id)
             .map(|(_, n)| *n)
             .unwrap_or(snap.provider_id.as_str());
-        match (remaining(snap), &snap.error) {
-            (Some(pct), _) => {
-                let mut line = format!("{name} {}% left", pct.round() as i64);
-                if let Some(at) = lead_window(snap).and_then(|w| w.resets_at) {
+        // Same helper as the icon, so the two can never name different windows.
+        let window = lead_window(snap).filter(|w| w.used_percent.is_some());
+        match (window, &snap.error) {
+            (Some(w), _) => {
+                let left = w.used_percent.map_or(0.0, |u| 100.0 - u);
+                let mut line = format!("{name} {}% left", left.round() as i64);
+                if let Some(at) = w.resets_at {
                     line.push_str(&format!(
                         ", resets {}",
                         at.with_timezone(&chrono::Local).format("%H:%M")
                     ));
+                }
+                if let Some(cap) = w.capped_by {
+                    line.push_str(&format!(" (capped by {cap})"));
                 }
                 lines.push(line);
             }
@@ -336,12 +408,10 @@ fn bar_color(remaining: Option<f64>) -> [u8; 3] {
     }
 }
 
-/// 32x32 RGBA: percent remaining as text plus a colored underline bar.
-fn render_icon(remaining: Option<f64>) -> Image<'static> {
-    let text = match remaining {
-        Some(p) => format!("{}", p.round() as i64),
-        None => "--".to_string(),
-    };
+/// 32x32 RGBA: the glyph text plus a colored underline bar. A stale glyph is drawn at
+/// 55 percent alpha while the bar keeps its last known color, so a dead number reads as
+/// dead at a glance without the icon going blank.
+fn render_icon(glyph: &Glyph) -> Image<'static> {
     let w = ICON_SIZE as usize;
     let mut buf = vec![0u8; w * w * 4];
 
@@ -350,9 +420,14 @@ fn render_icon(remaining: Option<f64>) -> Image<'static> {
     } else {
         [255, 255, 255]
     };
-    draw_text(&mut buf, &text, fg);
+    draw_text(
+        &mut buf,
+        &glyph.text,
+        fg,
+        if glyph.dim { 0.55 } else { 1.0 },
+    );
 
-    let [r, g, b] = bar_color(remaining);
+    let [r, g, b] = bar_color(glyph.remaining);
     for y in BAR_TOP..(ICON_SIZE - BAR_INSET) {
         for x in BAR_INSET..(ICON_SIZE - BAR_INSET) {
             let i = (y as usize * w + x as usize) * 4;
@@ -366,7 +441,7 @@ fn render_icon(remaining: Option<f64>) -> Image<'static> {
     Image::new_owned(buf, ICON_SIZE, ICON_SIZE)
 }
 
-fn draw_text(buf: &mut [u8], text: &str, color: [u8; 3]) {
+fn draw_text(buf: &mut [u8], text: &str, color: [u8; 3], alpha: f32) {
     let Some(font) = font() else { return };
     let px = if text.chars().count() >= 3 {
         19.0
@@ -395,7 +470,7 @@ fn draw_text(buf: &mut [u8], text: &str, color: [u8; 3]) {
                     return;
                 }
                 let i = (py as usize * w as usize + px as usize) * 4;
-                let a = (coverage.clamp(0.0, 1.0) * 255.0) as u8;
+                let a = (coverage.clamp(0.0, 1.0) * alpha * 255.0) as u8;
                 if a > buf[i + 3] {
                     buf[i] = color[0];
                     buf[i + 1] = color[1];
@@ -414,21 +489,25 @@ mod tests {
 
     fn snap(id: &str, used: f64) -> UsageSnapshot {
         let mut s = UsageSnapshot::new(id);
-        s.primary = Some(crate::providers::UsageWindow {
-            label: "5h".into(),
-            used_percent: used,
-            resets_at: None,
-            window_minutes: None,
-        });
+        s.primary = Some(crate::providers::UsageWindow::new(
+            "5h",
+            Some(used),
+            None,
+            None,
+        ));
         s
     }
 
     #[test]
     fn icon_and_pinning() {
         // 32x32 RGBA, always fully allocated even without a font.
-        let icon = render_icon(Some(57.0));
+        let icon = render_icon(&Glyph {
+            text: "57".into(),
+            remaining: Some(57.0),
+            dim: false,
+        });
         assert_eq!(icon.rgba().len(), 32 * 32 * 4);
-        assert_eq!(render_icon(None).rgba().len(), 32 * 32 * 4);
+        assert_eq!(render_icon(&Glyph::blank()).rgba().len(), 32 * 32 * 4);
 
         if font().is_some() {
             // Glyphs must land above the underline bar, not off canvas.
@@ -446,20 +525,24 @@ mod tests {
         let snaps = vec![snap("codex", 90.0), snap("claude", 10.0)];
         let mut cfg = Config::default();
         // no pin: first provider with data (codex, 10% left)
-        assert_eq!(pinned_remaining(&snaps, &cfg), Some(10.0));
+        assert_eq!(glyph(&snaps, &cfg).remaining, Some(10.0));
         cfg.pinned_provider = Some("claude".into());
-        assert_eq!(pinned_remaining(&snaps, &cfg), Some(90.0));
+        assert_eq!(glyph(&snaps, &cfg).remaining, Some(90.0));
         // pinned provider without data falls back to the first one
         cfg.pinned_provider = Some("nope".into());
-        assert_eq!(pinned_remaining(&snaps, &cfg), Some(10.0));
-        assert_eq!(pinned_remaining(&[], &cfg), None);
+        assert_eq!(glyph(&snaps, &cfg).remaining, Some(10.0));
+        assert_eq!(glyph(&[], &cfg).remaining, None);
+        assert_eq!(glyph(&[], &cfg).text, "--");
     }
 
     #[test]
     fn a_blur_hide_makes_the_next_tray_click_close_instead_of_reopen() {
         assert!(!consume_recent_hide(), "nothing hidden yet");
         note_hide();
-        assert!(consume_recent_hide(), "the click that caused the blur closes");
+        assert!(
+            consume_recent_hide(),
+            "the click that caused the blur closes"
+        );
         assert!(!consume_recent_hide(), "and only that one click");
     }
 
@@ -471,7 +554,69 @@ mod tests {
             w.label = "Weekly".into();
             w
         });
-        assert_eq!(remaining(&s), Some(49.0));
+        assert_eq!(
+            glyph(std::slice::from_ref(&s), &Config::default()).remaining,
+            Some(49.0)
+        );
         assert!(tooltip(&[s]).contains("49% left"));
+    }
+
+    /// Row 1 at the tray boundary: the icon and the tooltip must agree, and both must
+    /// report the exhausted weekly rather than the fresh 5h bucket in front of it.
+    #[test]
+    fn an_exhausted_weekly_paints_the_tray_red_not_green() {
+        let mut s = snap("codex", 2.0);
+        s.primary = Some(crate::providers::UsageWindow::new(
+            "5h",
+            Some(2.0),
+            None,
+            Some(300),
+        ));
+        s.secondary = Some(crate::providers::UsageWindow::new(
+            "Weekly",
+            Some(100.0),
+            Some(chrono::Utc::now() + chrono::Duration::minutes(150)),
+            Some(10080),
+        ));
+        let cfg = Config::default();
+        let g = glyph(std::slice::from_ref(&s), &cfg);
+        assert_eq!(g.remaining, Some(0.0), "not the fresh 5h bucket's 98");
+        assert_eq!(bar_color(g.remaining), [226, 74, 62]);
+
+        // Row 19: exhausted with a future reset draws the countdown, not a useless 0.
+        assert_eq!(g.text, "2h");
+        assert!(!g.dim, "a fresh snapshot is not dimmed");
+
+        let tip = tooltip(std::slice::from_ref(&s));
+        assert!(tip.contains("0% left"), "{tip}");
+        assert!(tip.contains("capped by Weekly"), "{tip}");
+    }
+
+    #[test]
+    fn a_stale_or_errored_snapshot_dims_the_glyph() {
+        let cfg = Config::default();
+        let mut s = snap("codex", 10.0);
+        assert!(!is_stale(&s, &cfg));
+
+        s.fetched_at = chrono::Utc::now() - chrono::Duration::minutes(16);
+        assert!(is_stale(&s, &cfg), "older than 3 x 5 minute intervals");
+
+        let mut errored = snap("codex", 10.0);
+        errored.error = Some("http error: 502".into());
+        assert!(is_stale(&errored, &cfg));
+        assert!(glyph(std::slice::from_ref(&errored), &cfg).dim);
+    }
+
+    #[test]
+    fn countdowns_are_coarse_and_never_negative() {
+        let now = chrono::Utc::now();
+        let at = |d: chrono::Duration| countdown(now + d, now);
+        assert_eq!(at(chrono::Duration::seconds(-1)), None);
+        assert_eq!(at(chrono::Duration::zero()), None);
+        // Under a minute still reads as a minute rather than a misleading zero.
+        assert_eq!(at(chrono::Duration::seconds(30)).unwrap(), "1m");
+        assert_eq!(at(chrono::Duration::minutes(34)).unwrap(), "34m");
+        assert_eq!(at(chrono::Duration::hours(2)).unwrap(), "2h");
+        assert_eq!(at(chrono::Duration::days(3)).unwrap(), "3d");
     }
 }

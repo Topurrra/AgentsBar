@@ -227,16 +227,16 @@ fn snapshot(body: &Value) -> Result<UsageSnapshot, ProviderError> {
         .and_then(parse_rfc3339);
 
     let mut snap = UsageSnapshot::new("warp");
-    snap.primary = Some(UsageWindow {
-        label: "Credits".into(),
-        used_percent: if unlimited {
+    snap.primary = Some(UsageWindow::new(
+        "Credits",
+        Some(if unlimited {
             0.0
         } else {
             percent(used as f64, limit as f64)
-        },
-        resets_at: if unlimited { None } else { resets_at },
-        window_minutes: None,
-    });
+        }),
+        if unlimited { None } else { resets_at },
+        None,
+    ));
     snap.plan = Some(if unlimited {
         "Unlimited".to_string()
     } else {
@@ -245,19 +245,19 @@ fn snapshot(body: &Value) -> Result<UsageSnapshot, ProviderError> {
 
     let bonus = bonus(inner);
     if bonus.granted > 0 || bonus.remaining > 0 {
-        snap.secondary = Some(UsageWindow {
-            label: "Add-on credits".into(),
-            used_percent: if bonus.granted > 0 {
+        snap.secondary = Some(UsageWindow::new(
+            "Add-on credits",
+            Some(if bonus.granted > 0 {
                 percent(
                     (bonus.granted - bonus.remaining) as f64,
                     bonus.granted as f64,
                 )
             } else {
                 0.0
-            },
-            resets_at: bonus.next_expiration,
-            window_minutes: None,
-        });
+            }),
+            bonus.next_expiration,
+            None,
+        ));
         snap.credits = Some(bonus.remaining as f64);
     }
     Ok(snap)
@@ -280,7 +280,7 @@ mod tests {
         )
         .unwrap();
         let primary = snap.primary.unwrap();
-        assert_eq!(primary.used_percent, 20.0);
+        assert_eq!(primary.used_percent, Some(20.0));
         assert_eq!(
             primary.resets_at.map(|d| d.timestamp()),
             Some(1_786_752_000)
@@ -298,7 +298,7 @@ mod tests {
         )
         .unwrap();
         let primary = snap.primary.unwrap();
-        assert_eq!(primary.used_percent, 0.0);
+        assert_eq!(primary.used_percent, Some(0.0));
         assert!(primary.resets_at.is_none());
         assert_eq!(snap.plan.as_deref(), Some("Unlimited"));
     }
@@ -320,10 +320,10 @@ mod tests {
         )
         .unwrap();
         // Quoted numbers still count.
-        assert_eq!(snap.primary.unwrap().used_percent, 25.0);
+        assert_eq!(snap.primary.unwrap().used_percent, Some(25.0));
         let secondary = snap.secondary.unwrap();
         // 200 granted, 50 remaining.
-        assert_eq!(secondary.used_percent, 75.0);
+        assert_eq!(secondary.used_percent, Some(75.0));
         assert_eq!(snap.credits, Some(50.0));
         // The spent grant expiring in September must not win over the two live ones.
         assert_eq!(

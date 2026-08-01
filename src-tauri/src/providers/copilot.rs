@@ -183,7 +183,7 @@ impl Quota {
                 _ => return None,
             },
         };
-        Some((100.0 - percent_remaining).clamp(0.0, 100.0))
+        Some(100.0 - percent_remaining)
     }
 }
 
@@ -193,24 +193,27 @@ fn window(
     resets_at: Option<DateTime<Utc>>,
 ) -> Option<UsageWindow> {
     let used_percent = quota.as_ref()?.used_percent()?;
-    Some(UsageWindow {
-        label: label.to_string(),
-        used_percent,
-        resets_at,
-        window_minutes: None,
-    })
+    Some(UsageWindow::new(label, Some(used_percent), resets_at, None))
 }
 
 fn snapshot(body: UsageResponse, user: Option<String>) -> Result<UsageSnapshot, ProviderError> {
     let resets_at = body.quota_reset_date.as_deref().and_then(parse_reset);
-    let premium = window("Premium", &body.quota_snapshots.premium_interactions, resets_at);
+    let premium = window(
+        "Premium",
+        &body.quota_snapshots.premium_interactions,
+        resets_at,
+    );
     let chat = window("Chat", &body.quota_snapshots.chat, resets_at);
     let unlimited = body
         .quota_snapshots
         .premium_interactions
         .as_ref()
         .is_some_and(|q| q.unlimited)
-        || body.quota_snapshots.chat.as_ref().is_some_and(|q| q.unlimited);
+        || body
+            .quota_snapshots
+            .chat
+            .as_ref()
+            .is_some_and(|q| q.unlimited);
 
     let mut snap = UsageSnapshot::new("copilot");
     snap.account = user;
@@ -262,15 +265,15 @@ mod tests {
     #[test]
     fn premium_quota_maps_to_primary() {
         let snap = parse(
-            r#"{"copilot_plan":"individual","quota_reset_date":"2026-09-01",
+            r#"{"copilot_plan":"individual","quota_reset_date":"2033-09-01",
                 "quota_snapshots":{"premium_interactions":{"entitlement":300,"remaining":75,
                 "percent_remaining":25,"unlimited":false},
                 "chat":{"entitlement":100,"remaining":90,"unlimited":false}}}"#,
         )
         .unwrap();
         assert_eq!(snap.plan.as_deref(), Some("Individual"));
-        assert_eq!(snap.primary.as_ref().unwrap().used_percent, 75.0);
-        assert_eq!(snap.secondary.as_ref().unwrap().used_percent, 10.0);
+        assert_eq!(snap.primary.as_ref().unwrap().used_percent, Some(75.0));
+        assert_eq!(snap.secondary.as_ref().unwrap().used_percent, Some(10.0));
         assert!(snap.primary.as_ref().unwrap().resets_at.is_some());
     }
 
@@ -293,7 +296,7 @@ mod tests {
         )
         .unwrap();
         assert!(snap.primary.is_none());
-        assert_eq!(snap.secondary.as_ref().unwrap().used_percent, 60.0);
+        assert_eq!(snap.secondary.as_ref().unwrap().used_percent, Some(60.0));
     }
 
     #[test]

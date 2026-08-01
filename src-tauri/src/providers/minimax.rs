@@ -70,7 +70,7 @@ const WEEKLY: Lane = Lane {
 
 fn lane_window(item: &Value, lane: &Lane, now: DateTime<Utc>) -> Option<UsageWindow> {
     let used_percent = match num(item, lane.remaining_percent) {
-        Some(remaining_percent) => (100.0 - remaining_percent).clamp(0.0, 100.0),
+        Some(remaining_percent) => 100.0 - remaining_percent,
         None => {
             let total = num(item, lane.total).filter(|t| *t > 0.0)?;
             let remaining = num(item, lane.remaining)?;
@@ -100,12 +100,13 @@ fn lane_window(item: &Value, lane: &Lane, now: DateTime<Utc>) -> Option<UsageWin
             }),
     };
 
-    Some(UsageWindow {
-        label: window_label(lane, window_minutes),
-        used_percent,
+    Some(UsageWindow::at(
+        window_label(lane, window_minutes),
+        Some(used_percent),
         resets_at,
         window_minutes,
-    })
+        now,
+    ))
 }
 
 fn window_label(lane: &Lane, minutes: Option<u64>) -> String {
@@ -280,7 +281,7 @@ mod tests {
         let snapshot = parse(SAMPLE, 1_700_000_000).unwrap();
         let primary = snapshot.primary.unwrap();
         // usage_count is remaining quota, so 250 left of 1000 is 75% used.
-        assert_eq!(primary.used_percent, 75.0);
+        assert_eq!(primary.used_percent, Some(75.0));
         assert_eq!(primary.window_minutes, Some(300));
         assert_eq!(primary.label, "5h");
         assert_eq!(primary.resets_at.unwrap().timestamp(), 1_700_018_000);
@@ -294,9 +295,9 @@ mod tests {
           "model_remains":[{"current_interval_remaining_percent":30,
           "current_weekly_total_count":100,"current_weekly_usage_count":40}]}}"#;
         let snapshot = parse(body, 1_700_000_000).unwrap();
-        assert_eq!(snapshot.primary.unwrap().used_percent, 70.0);
+        assert_eq!(snapshot.primary.unwrap().used_percent, Some(70.0));
         let weekly = snapshot.secondary.unwrap();
-        assert_eq!(weekly.used_percent, 60.0);
+        assert_eq!(weekly.used_percent, Some(60.0));
         assert_eq!(weekly.label, "Weekly");
         assert_eq!(snapshot.credits, Some(42.5));
     }

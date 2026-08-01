@@ -48,12 +48,12 @@ fn key_window(key: &KeyData) -> Option<UsageWindow> {
     if limit <= 0.0 || usage < 0.0 {
         return None;
     }
-    Some(UsageWindow {
-        label: "Key limit".to_string(),
-        used_percent: percent(usage, limit),
-        resets_at: None,
-        window_minutes: None,
-    })
+    Some(UsageWindow::new(
+        "Key limit",
+        Some(percent(usage, limit)),
+        None,
+        None,
+    ))
 }
 
 #[async_trait]
@@ -114,7 +114,7 @@ mod tests {
             r#"{"data":{"limit":10.0,"usage":2.5,"rate_limit":{"requests":10,"interval":"10s"}}}"#,
         )
         .unwrap();
-        assert_eq!(key_window(&key.data).unwrap().used_percent, 25.0);
+        assert_eq!(key_window(&key.data).unwrap().used_percent, Some(25.0));
     }
 
     #[test]

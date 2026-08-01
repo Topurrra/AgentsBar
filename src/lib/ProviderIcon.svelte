@@ -1,32 +1,34 @@
 <script>
-  import { providerAccent, providerGlyph, providerLetter } from "./icons.js";
+  import { providerAccent, providerLogoName, providerLetter } from "./icons.js";
+
+  // Bundled at build time, no runtime fetch. Each file keeps its own viewBox; the
+  // rendered size comes from CSS below, so no path data is ever rescaled.
+  const LOGOS = import.meta.glob("./logos/*.svg", {
+    query: "?raw",
+    import: "default",
+    eager: true,
+  });
 
   let { id, size = 16 } = $props();
 
   const accent = $derived(providerAccent(id));
-  const glyph = $derived(providerGlyph(id));
+  const logo = $derived(LOGOS[`./logos/${providerLogoName(id)}.svg`] ?? null);
 </script>
 
-<svg
-  width={size}
-  height={size}
-  viewBox="0 0 24 24"
-  aria-hidden="true"
-  focusable="false"
-  style="color: {accent}"
->
-  {#if glyph}
-    <g
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.8"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-    >
-      <!-- eslint-disable-next-line svelte/no-at-html-tags -- static local markup -->
-      {@html glyph}
-    </g>
-  {:else}
+{#if logo}
+  <span class="logo" style="--s: {size}px; color: {accent}" aria-hidden="true"
+    ><!-- eslint-disable-next-line svelte/no-at-html-tags -- bundled local asset -->
+    {@html logo}</span
+  >
+{:else}
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    aria-hidden="true"
+    focusable="false"
+    style="color: {accent}"
+  >
     <rect
       x="1.5"
       y="1.5"
@@ -46,12 +48,26 @@
       dominant-baseline="central"
       font-family="inherit">{providerLetter(id)}</text
     >
-  {/if}
-</svg>
+  </svg>
+{/if}
 
 <style>
   svg {
     flex: none;
     display: block;
+  }
+
+  .logo {
+    flex: none;
+    display: block;
+    width: var(--s);
+    height: var(--s);
+  }
+
+  /* Overrides each file's own width/height attributes without touching its viewBox. */
+  .logo :global(svg) {
+    display: block;
+    width: 100%;
+    height: 100%;
   }
 </style>

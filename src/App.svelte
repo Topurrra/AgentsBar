@@ -1,7 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { call, getHistory } from "./lib/api.js";
+  import { call, getHistory, hidePopover } from "./lib/api.js";
   import Usage from "./lib/Usage.svelte";
   import Settings from "./lib/Settings.svelte";
 
@@ -16,6 +16,10 @@
   const enabled = $derived(
     providers.filter((p) => config?.providers?.[p.id]?.enabled),
   );
+
+  // Row 20: a tile is stale once it is older than two refresh intervals. One missed
+  // cycle is normal; two means the number on screen is not what the tile implies.
+  const staleMs = $derived((config?.refresh_minutes ?? 5) * 2 * 60000);
 
   async function loadConfig() {
     const [cfg, list] = await Promise.all([call("get_config"), call("list_providers")]);
@@ -63,6 +67,15 @@
 
     // Countdowns tick locally, no backend traffic.
     const tick = setInterval(() => (now = Date.now()), 30000);
+
+    // Escape backs out of Settings, then closes the popover. Same muscle memory as
+    // every other menu bar app.
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      if (view === "settings") view = "usage";
+      else hidePopover();
+    };
+    window.addEventListener("keydown", onKey);
     const subs = [
       listen("usage-updated", (e) => {
         if (Array.isArray(e.payload)) snapshots = e.payload;
@@ -73,6 +86,7 @@
 
     return () => {
       clearInterval(tick);
+      window.removeEventListener("keydown", onKey);
       for (const s of subs) s.then((un) => un()).catch(() => {});
     };
   });
@@ -107,6 +121,8 @@
       {history}
       {now}
       {refreshing}
+      {staleMs}
+      pinned={config?.pinned_provider ?? null}
       ready={config !== null}
       onRefresh={refreshAll}
       onRetry={retry}
@@ -131,7 +147,7 @@
     height: 34px;
     padding: 0 6px 0 12px;
     border-bottom: 1px solid var(--line);
-    background: #131316;
+    background: var(--chrome);
   }
 
   .title {
