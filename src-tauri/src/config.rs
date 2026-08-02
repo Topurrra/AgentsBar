@@ -139,6 +139,10 @@ pub struct Config {
     pub theme: String,
     #[serde(default = "default_true")]
     pub notify_on_exhaustion: bool,
+    /// Optional HTTP(S) proxy all provider requests are routed through, for corporate
+    /// networks that egress via one. `None` (the default) is a direct connection.
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -159,6 +163,7 @@ impl Default for Config {
             launch_at_startup: false,
             theme: "auto".to_string(),
             notify_on_exhaustion: true,
+            proxy_url: None,
         }
     }
 }
@@ -213,6 +218,12 @@ impl Config {
     /// The upper bound keeps `refresh_minutes * 60` from overflowing a u64 duration.
     pub fn normalize(&mut self) {
         self.refresh_minutes = self.refresh_minutes.clamp(1, 1440);
+        // A blank or whitespace proxy is no proxy at all.
+        self.proxy_url = self
+            .proxy_url
+            .take()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
         for provider in self.providers.values_mut() {
             provider.unwrap_secrets();
             // An unknown source would silently disable a provider, so fall back to auto.

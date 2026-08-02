@@ -10,6 +10,7 @@ Docs/
 # Agent and editor state
 .claude/
 .claude-*
+.qwen/
 .vscode/
 .idea/
 .cursor/

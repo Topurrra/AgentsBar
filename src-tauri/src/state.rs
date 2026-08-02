@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::config::Config;
@@ -22,46 +22,68 @@ pub struct AppState {
     /// intent to fetch, and deliberately keyed by provider rather than shared, because a
     /// batch-wide backoff would need a contract for partial success that we do not have.
     skip_until: RwLock<HashMap<String, DateTime<Utc>>>,
-    pub http: reqwest::Client,
+    /// Behind a lock so a proxy change in Settings can swap in a rebuilt client without
+    /// restarting the app. `reqwest::Client` is an Arc internally, so cloning it out of
+    /// the read lock is cheap and every in-flight batch keeps the client it started with.
+    pub http: RwLock<reqwest::Client>,
+}
+
+/// Build the shared HTTP client, routing through `proxy` when one is configured.
+fn build_http_client(proxy: Option<&str>) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent(concat!("AgentsBar/", env!("CARGO_PKG_VERSION")))
+        // These requests carry imported browser cookies and API keys, so a redirect
+        // that leaves the original origin is an exfiltration path. Follow only HTTPS
+        // redirects that keep the same scheme, host and port; refuse the rest rather
+        // than trusting reqwest to strip a manually set Cookie header.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let next = attempt.url();
+            let same_origin = attempt.previous().last().is_some_and(|prev| {
+                next.scheme() == "https"
+                    && prev.scheme() == next.scheme()
+                    && prev.host_str() == next.host_str()
+                    && prev.port_or_known_default() == next.port_or_known_default()
+            });
+            if !same_origin {
+                // Ends the chain and returns the 3xx itself, so a provider that
+                // genuinely needs an off-origin hop fails visibly instead of sending
+                // the credential onward.
+                attempt.stop()
+            } else if attempt.previous().len() > 5 {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        }));
+    if let Some(url) = proxy {
+        // `Proxy::all` covers both http and https targets. A bad URL is a config mistake
+        // the user can fix, so fall back to a direct connection rather than refusing to
+        // build the whole client; the fetch will then fail visibly per provider.
+        match reqwest::Proxy::all(url) {
+            Ok(p) => builder = builder.proxy(p),
+            Err(e) => log::warn!("ignoring invalid proxy {url:?}: {e}"),
+        }
+    }
+    builder.build().expect("failed to build http client")
 }
 
 impl AppState {
     pub fn new(config: Config) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .user_agent(concat!("AgentsBar/", env!("CARGO_PKG_VERSION")))
-            // These requests carry imported browser cookies and API keys, so a redirect
-            // that leaves the original origin is an exfiltration path. Follow only HTTPS
-            // redirects that keep the same scheme, host and port; refuse the rest rather
-            // than trusting reqwest to strip a manually set Cookie header.
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                let next = attempt.url();
-                let same_origin = attempt.previous().last().is_some_and(|prev| {
-                    next.scheme() == "https"
-                        && prev.scheme() == next.scheme()
-                        && prev.host_str() == next.host_str()
-                        && prev.port_or_known_default() == next.port_or_known_default()
-                });
-                if !same_origin {
-                    // Ends the chain and returns the 3xx itself, so a provider that
-                    // genuinely needs an off-origin hop fails visibly instead of sending
-                    // the credential onward.
-                    attempt.stop()
-                } else if attempt.previous().len() > 5 {
-                    attempt.error("too many redirects")
-                } else {
-                    attempt.follow()
-                }
-            }))
-            .build()
-            .expect("failed to build http client");
+        let http = build_http_client(config.proxy_url.as_deref());
         Self {
             snapshots: RwLock::new(HashMap::new()),
             config: RwLock::new(config),
             history: RwLock::new(History::load()),
             skip_until: RwLock::new(HashMap::new()),
-            http,
+            http: RwLock::new(http),
         }
+    }
+
+    /// Swap in a client rebuilt for the given proxy. Called from `set_config` when the
+    /// proxy field changes, so the new route applies from the very next refresh.
+    pub async fn set_proxy(&self, proxy: Option<&str>) {
+        *self.http.write().await = build_http_client(proxy);
     }
 
     // ------------------------------------------------------------- row 23, backoff
@@ -113,8 +135,8 @@ impl AppState {
         // The dedup interval has to be the cadence actually in use. Under adaptive,
         // `refresh_minutes` is only the fixed interval sitting underneath: an idle machine
         // batches every 30 minutes, every gap would exceed a 5 minute window, and an
-        // unchanged value would append forever, silently stretching what 288 samples cover
-        // from a day to several.
+        // unchanged value would append forever, silently stretching what 2016 samples
+        // cover from a week to several.
         let refresh_secs = {
             let config = self.config.read().await;
             crate::scheduler::max_cadence_secs(&config)
@@ -149,9 +171,34 @@ impl AppState {
 
     pub async fn fetch_context(&self) -> FetchContext {
         FetchContext {
-            http: self.http.clone(),
+            http: self.http.read().await.clone(),
             config: self.config.read().await.clone(),
         }
+    }
+}
+
+/// Path the CLI `status` command reads: the current display snapshots, written on every
+/// refresh so the CLI shows the same numbers as the tray without talking to the app.
+pub fn snapshots_path() -> std::path::PathBuf {
+    crate::config::dir().join("snapshots.json")
+}
+
+/// Write the display snapshots for the CLI. Atomic temp-plus-rename, the same discipline
+/// as config and history. A failure is logged and dropped: the CLI reading slightly stale
+/// data is fine, a failed refresh is not.
+pub fn persist_display(display: &[DisplaySnapshot]) {
+    let path = snapshots_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.tmp");
+    let result = (|| -> std::io::Result<()> {
+        std::fs::write(&tmp, serde_json::to_vec(display)?)?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        log::warn!("snapshot persist failed: {e}");
     }
 }
 
@@ -162,7 +209,7 @@ impl AppState {
 ///
 /// Serializes with the same field names as `UsageWindow`, so anything that already reads
 /// a window reads this too, and gains one extra key.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayWindow {
     pub label: String,
     pub used_percent: Option<f64>,
@@ -179,7 +226,7 @@ pub struct DisplayWindow {
 /// `windows` is what the tile must render. Row 25 asks for one implementation of the
 /// clamp, and this is how the single Rust one reaches JavaScript instead of being
 /// re-derived there from the raw lanes.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplaySnapshot {
     #[serde(flatten)]
     pub snapshot: UsageSnapshot,

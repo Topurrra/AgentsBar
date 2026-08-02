@@ -49,6 +49,9 @@ fn to_snapshot(response: &BalanceResponse) -> Result<UsageSnapshot, ProviderErro
         select(&response.balance_infos).ok_or_else(|| ProviderError::Parse("no balance".into()))?;
     let mut snapshot = UsageSnapshot::new("deepseek");
     snapshot.credits = Some(selected.total());
+    // The wallet can be USD or CNY; name the actual currency so the cost summary only
+    // folds this into the dollar total when it really is dollars.
+    snapshot.credits_unit = Some(selected.currency.clone());
     snapshot.plan = Some(if response.is_available {
         selected.currency.clone()
     } else {

@@ -45,6 +45,31 @@ export function oldestFetch(snapshots) {
   return best === null ? null : new Date(best).toISOString();
 }
 
+// The footer cost line, aggregated only from money the providers report in USD:
+// `spend_usd` is a trailing-window SPEND (OpenAI's last 30 days), and `credits` whose
+// `credits_unit` is "USD" is a remaining BALANCE (DeepSeek's USD wallet, OpenRouter,
+// xAI, OpenAI credits). A CNY wallet or a token count carries a different unit and is
+// deliberately left out, so the total is never dollars plus characters plus tokens.
+// Returns null when nothing on screen reports USD, and the caller renders nothing.
+export function costSummary(snapshots) {
+  let spend = 0;
+  let balance = 0;
+  let hasSpend = false;
+  let hasBalance = false;
+  for (const s of snapshots ?? []) {
+    if (Number.isFinite(s?.spend_usd)) {
+      spend += s.spend_usd;
+      hasSpend = true;
+    }
+    if (s?.credits_unit === "USD" && Number.isFinite(s?.credits)) {
+      balance += s.credits;
+      hasBalance = true;
+    }
+  }
+  if (!hasSpend && !hasBalance) return null;
+  return { spend, balance, hasSpend, hasBalance };
+}
+
 // --- row 26: pace ------------------------------------------------------------------
 
 // Below this much of the window elapsed there is no burn rate worth reporting: at 1%

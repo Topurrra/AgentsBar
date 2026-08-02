@@ -116,6 +116,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
     // Popover semantics: it disappears as soon as it loses focus.
     if let Some(window) = app.get_webview_window("main") {
+        round_corners(&window);
         let w = window.clone();
         window.on_window_event(move |event| {
             if let tauri::WindowEvent::Focused(false) = event {
@@ -131,6 +132,34 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
     Ok(())
 }
+
+/// Ask DWM for rounded corners on the popover. The window is undecorated, so without
+/// this it draws square corners; Windows 11 rounds them once the preference is set.
+/// Windows 10 ignores the attribute and stays square, which is fine. A failure (no DWM,
+/// older build) is logged and dropped: square corners are not worth refusing to start.
+#[cfg(windows)]
+fn round_corners(window: &tauri::WebviewWindow) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let preference = DWMWCP_ROUND;
+    unsafe {
+        if let Err(e) = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const _ as *const _,
+            std::mem::size_of_val(&preference) as u32,
+        ) {
+            log::warn!("could not round window corners: {e}");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn round_corners(_window: &tauri::WebviewWindow) {}
 
 /// Turn autostart on or off and keep the tray checkbox in sync.
 pub fn apply_autostart(app: &AppHandle, enabled: bool) {

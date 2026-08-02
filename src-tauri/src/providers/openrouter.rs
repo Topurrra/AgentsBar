@@ -99,6 +99,7 @@ impl Provider for OpenRouter {
 
         let mut snapshot = UsageSnapshot::new(self.id());
         snapshot.credits = Some(balance(&credits.data));
+        snapshot.credits_unit = Some("USD".to_string());
         snapshot.primary = key_window(&key_data);
         Ok(snapshot)
     }

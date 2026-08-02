@@ -196,6 +196,13 @@
     padding: var(--sp-4) var(--sp-5) var(--sp-5);
     /* One hairline of the brand color down the left edge. That is the whole accent. */
     box-shadow: inset 2px 0 0 var(--accent-soft);
+    transition: background var(--motion-fast) var(--ease);
+  }
+
+  /* A gentle lift on hover so the list feels responsive. Kept to the background only:
+     the tile is not itself a link (the name is), so the frame and accent stay put. */
+  .tile:hover {
+    background: var(--surface-raised-hover);
   }
 
   /* The frame is the list-level signal. A calm or unknown tile deliberately has no

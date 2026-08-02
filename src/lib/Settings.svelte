@@ -103,6 +103,13 @@
     patch((c) => (c.pinned_provider = v === "" ? null : v));
   }
 
+  // Saved on blur, like the key fields: a blank value means a direct connection. The
+  // backend rebuilds the HTTP client only when this actually changes.
+  function setProxy(e) {
+    const v = e.currentTarget.value.trim();
+    patch((c) => (c.proxy_url = v === "" ? null : v));
+  }
+
   function setEnabled(id, e) {
     const on = e.currentTarget.checked;
     patch((c) => {
@@ -148,6 +155,47 @@
       ? "Cleared. The next refresh reads your browser again."
       : "Could not clear the cookie cache.";
     onKeySaved();
+  }
+
+  // Settings backup. Export serializes the already-redacted config (secrets never leave
+  // the backend), so the JSON is safe to paste anywhere. Import parses pasted JSON and
+  // hands it to set_config, which normalizes it and merges this machine's stored keys
+  // back in, so a backup from another machine keeps the local credentials.
+  let configNote = $state("");
+  let configExport = $state("");
+  let importText = $state("");
+  let showImport = $state(false);
+
+  async function exportConfig() {
+    configNote = "";
+    configExport = "";
+    const text = JSON.stringify($state.snapshot(config), null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      configNote = "Copied. Paste it into a file or a message to move it.";
+    } catch {
+      configExport = text;
+      configNote = "Clipboard blocked. Select the settings below and copy them.";
+    }
+  }
+
+  function importConfig() {
+    configNote = "";
+    let parsed;
+    try {
+      parsed = JSON.parse(importText);
+    } catch {
+      configNote = "That is not valid JSON.";
+      return;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      configNote = "Settings must be a JSON object.";
+      return;
+    }
+    onSave(parsed);
+    importText = "";
+    showImport = false;
+    configNote = "Imported. Stored keys on this machine were kept.";
   }
 
   // Keys are saved on blur through set_api_key, never through set_config. The backend
@@ -275,6 +323,25 @@
         </span>
       </div>
     </div>
+
+    <div class="field">
+      <div class="row">
+        <label for="proxy">Proxy</label>
+      </div>
+      <input
+        id="proxy"
+        type="text"
+        class="proxy"
+        placeholder="http://proxy:8080"
+        autocomplete="off"
+        spellcheck="false"
+        value={config?.proxy_url ?? ""}
+        onblur={setProxy}
+      />
+      <p class="note">
+        Routes all provider requests through this proxy. Leave blank for a direct connection.
+      </p>
+    </div>
   </section>
 
   <div class="secthead">
@@ -296,6 +363,38 @@
       {/if}
       {#if report}
         <textarea class="report" readonly rows="6" spellcheck="false" value={report}></textarea>
+      {/if}
+    </div>
+
+    <div class="field">
+      <div class="row wrap">
+        <label for="exportcfg">Settings backup</label>
+        <span class="gap"></span>
+        <span class="btns">
+          <button id="exportcfg" class="btn" onclick={exportConfig}>Copy settings</button>
+          <button class="btn" onclick={() => (showImport = !showImport)}>
+            {showImport ? "Hide import" : "Import settings"}
+          </button>
+        </span>
+      </div>
+      {#if configNote}
+        <p class="note">{configNote}</p>
+      {/if}
+      {#if configExport}
+        <textarea class="report" readonly rows="6" spellcheck="false" value={configExport}></textarea>
+      {/if}
+      {#if showImport}
+        <textarea
+          class="report"
+          rows="6"
+          spellcheck="false"
+          bind:value={importText}
+          placeholder="Paste settings JSON here…"
+        ></textarea>
+        <div class="row">
+          <span class="gap"></span>
+          <button class="btn" onclick={importConfig}>Apply</button>
+        </div>
       {/if}
     </div>
   </section>
@@ -768,6 +867,11 @@
     width: 100%;
     padding-left: 26px;
     letter-spacing: 0.5px;
+  }
+
+  .proxy {
+    width: 100%;
+    margin-top: var(--sp-2);
   }
 
   .key::placeholder {

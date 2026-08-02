@@ -54,8 +54,9 @@ impl Provider for OpenAi {
         match fetch_spend(&ctx.http, &key).await {
             Ok(spend) => {
                 let mut snap = UsageSnapshot::new("openai");
-                // `account` is an email or account label, so the spend rides along in
-                // `plan`, the same free text slot deepgram uses for its usage line.
+                // The real trailing-window spend, captured as a number for the cost
+                // summary; `plan` keeps the human line the tile shows.
+                snap.spend_usd = Some(spend);
                 snap.plan = Some(format!("Admin API, ${spend:.2} last {HISTORY_DAYS} days"));
                 Ok(snap)
             }
@@ -236,6 +237,7 @@ fn balance_snapshot(grants: CreditGrants, now: DateTime<Utc>) -> UsageSnapshot {
         now,
     ));
     snap.credits = Some(grants.total_available);
+    snap.credits_unit = Some("USD".to_string());
     snap.plan = Some("API credits".to_string());
     snap
 }

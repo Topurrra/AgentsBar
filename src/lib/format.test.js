@@ -1,6 +1,6 @@
 // Run: node src/lib/format.test.js
 import assert from "node:assert/strict";
-import { percentLeft, tone, countdown, credits } from "./format.js";
+import { percentLeft, tone, countdown, credits, usd } from "./format.js";
 
 assert.equal(percentLeft({ used_percent: 43 }), 57);
 assert.equal(percentLeft({ used_percent: 120 }), 0);
@@ -33,5 +33,12 @@ assert.equal(countdown(null, t0), "");
 
 assert.equal(credits(12.345), "12.35");
 assert.equal(credits(null), null);
+
+// usd is locale-formatted, so match the digits rather than a fixed "$" string.
+assert.equal(usd(null), null);
+assert.equal(usd(NaN), null);
+assert.equal(usd(Infinity), null);
+assert.match(usd(12.5), /12[.,]50/);
+assert.match(usd(1000), /1[.,]000[.,]00/);
 
 console.log("format.js ok");

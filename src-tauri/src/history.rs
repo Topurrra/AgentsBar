@@ -1,10 +1,12 @@
 //! Usage history for the popover sparklines.
 //!
-//! One ring buffer per series, 288 samples (24 hours at the default 5 minute refresh),
+//! One ring buffer per series, 2016 samples (~7 days at the default 5 minute refresh),
 //! persisted to `%APPDATA%\AgentsBar\history.json` with the same atomic temp-plus-rename
 //! discipline as config.rs.
 //!
 //! A series is a provider AND an account (row 35, see [`series_key`]), not a provider.
+//! The frontend picks the window it draws (24h or 7d) from the sample timestamps; the
+//! buffer just has to hold enough samples to cover the wider one.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,10 +16,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::UsageSnapshot;
 
-/// 24 hours at the default 5 minute refresh. At ~36 bytes per sample and 23 providers the
-/// file stays under 250 kB in the worst case, every provider configured and every series
-/// full. A real install has a handful of providers and a fraction of that.
-pub const MAX_SAMPLES: usize = 288;
+/// ~7 days at the default 5 minute refresh (7 * 24 * 12). The adaptive cadence idles at
+/// 30 minutes, so a quiet machine accumulates far fewer samples than this in a week and
+/// the buffer simply holds longer; an active one at 2 minutes fills it in ~67 hours. The
+/// frontend filters to the window it draws, so the cap only has to cover the wider one.
+/// At ~40 bytes per sample and 24 providers the file stays under ~2.5 MB in the worst
+/// case, every provider configured and every series full. A real install has a handful
+/// of providers and a fraction of that.
+pub const MAX_SAMPLES: usize = 2016;
 
 /// Series kept per provider: the account in use plus one previous, so switching back and
 /// forth between two accounts keeps both charts. History is a nicety, and an unbounded set
@@ -482,12 +488,16 @@ mod tests {
         assert_eq!(h.series()["codex"][0].u, 100.0);
 
         // Over-long series from a hand-edited file are trimmed on load.
-        let long: Vec<String> = (0..400)
-            .map(|i| format!(r#"{{"t":{},"u":1.0}}"#, i + 1))
+        let total = MAX_SAMPLES + 100;
+        let long: Vec<String> = (0..total)
+            .map(|i| format!(r#"{{"t":{},"u":1.0}}"#, i as i64 + 1))
             .collect();
         let h = History::parse(&format!(r#"{{"codex":[{}]}}"#, long.join(",")));
         assert_eq!(h.series()["codex"].len(), MAX_SAMPLES);
-        assert_eq!(h.series()["codex"][0].t, 400 - MAX_SAMPLES as i64 + 1);
+        assert_eq!(
+            h.series()["codex"][0].t,
+            total as i64 - MAX_SAMPLES as i64 + 1
+        );
     }
 
     #[test]
@@ -500,10 +510,11 @@ mod tests {
                 h.record(&s, 0);
             }
         }
-        // Row 17 added the lane label to every sample, which cost about 6 bytes each in
-        // this worst case (23 providers, every series full). Still a rounding error next
-        // to the app's own footprint, and the file is only rewritten once a refresh.
+        // Row 17 added the lane label to every sample, which cost about 6 bytes each. The
+        // 7-day buffer (2016 samples) is the dominant term now: worst case is 24 providers
+        // every series full. Still a rounding error next to the app's own footprint, and
+        // the file is only rewritten once a refresh.
         let bytes = serde_json::to_vec(&h).unwrap().len();
-        assert!(bytes < 250_000, "history.json would be {bytes} bytes");
+        assert!(bytes < 2_500_000, "history.json would be {bytes} bytes");
     }
 }

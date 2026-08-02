@@ -71,6 +71,10 @@
      to guess an alpha. */
   --overlay-hover: rgba(255, 255, 255, 0.06);
   --overlay-press: rgba(255, 255, 255, 0.03);
+  /* Chip fill is its own token, not --overlay-hover: a chip is a label that must be
+     readable at rest, while the overlay is a hover state. In light mode especially,
+     a 5% overlay on white disappears. */
+  --chip-bg: rgba(255, 255, 255, 0.08);
 
   /* --- Borders ------------------------------------------------------------ */
   --border: rgba(255, 255, 255, 0.075); /* default hairline */
@@ -153,53 +157,62 @@
   --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color-scheme: light;
+/* Light theme. The `data-theme` attribute on <html> is the single source of truth,
+   set by App.svelte from the user's choice: "light" forces this block, "dark" leaves
+   the defaults above, and "auto" resolves to one of the two via matchMedia before the
+   window is ever shown (the popover starts hidden), so no media query is needed here. */
+:root[data-theme="light"] {
+  color-scheme: light;
 
-    --surface-app: #ffffff;
-    --surface-chrome: #f4f4f5;
-    --surface-chrome-top: #eaeaec;
-    --surface-raised: #fafafb;
-    --surface-raised-hover: #f0f0f2;
-    --surface-sunken: #f0f0f2;
-    --surface-track: #e4e4e6;
-    --surface-hatch: #c8c8cc;
-    --surface-toggle: #d0d0d4;
+  /* A soft neutral page instead of pure white: less glare, and the white cards read as
+     raised surfaces against it. The layering mirrors the dark theme — page < chrome <
+     raised — so depth means the same thing in both schemes. */
+  --surface-app: #e3e3e9;
+  --surface-chrome: #ededf2;
+  --surface-chrome-top: #f7f7fa;
+  --surface-raised: #ffffff;
+  --surface-raised-hover: #f4f4f8;
+  --surface-sunken: #d8d8df;
+  --surface-track: #cdccd5;
+  --surface-hatch: #aaaab4;
+  --surface-toggle: #bcbcc6;
 
-    --overlay-hover: rgba(0, 0, 0, 0.04);
-    --overlay-press: rgba(0, 0, 0, 0.02);
+  --overlay-hover: rgba(20, 20, 40, 0.05);
+  --overlay-press: rgba(20, 20, 40, 0.03);
+  /* A solid, clearly visible chip fill on white cards — the 5% overlay it replaces
+     would vanish in light mode. */
+  --chip-bg: #e2e2e8;
 
-    --border: rgba(0, 0, 0, 0.08);
-    --border-strong: rgba(0, 0, 0, 0.15);
-    --border-focus: rgba(0, 0, 0, 0.4);
-    --sheen: rgba(0, 0, 0, 0.02);
+  --border: rgba(15, 15, 30, 0.11);
+  --border-strong: rgba(15, 15, 30, 0.2);
+  --border-focus: rgba(15, 15, 30, 0.5);
+  /* A white top highlight reads as a raised edge on the light chrome. */
+  --sheen: rgba(255, 255, 255, 0.65);
 
-    --scrollbar-thumb: rgba(0, 0, 0, 0.12);
-    --scrollbar-thumb-hover: rgba(0, 0, 0, 0.2);
+  --scrollbar-thumb: rgba(15, 15, 30, 0.22);
+  --scrollbar-thumb-hover: rgba(15, 15, 30, 0.32);
 
-    --text-primary: #1a1a1c;
-    --text-secondary: #5c5c66;
-    --text-muted: #8a8a94;
+  --text-primary: #14141a;
+  --text-secondary: #44444e;
+  --text-muted: #6c6c78;
 
-    --accent-on: #2da44e;
-    --accent-on-track: #acf4bd;
+  --accent-on: #2da44e;
+  --accent-on-track: #bfeecd;
 
-    --state-calm-bar: #2da44e;
-    --state-calm-text: #1a7f37;
+  --state-calm-bar: #2da44e;
+  --state-calm-text: #1a7f37;
 
-    --state-watch-bar: #9a6700;
-    --state-watch-text: #7d5e00;
-    --state-watch-edge: rgba(154, 103, 0, 0.25);
+  --state-watch-bar: #9a6700;
+  --state-watch-text: #7d5e00;
+  --state-watch-edge: rgba(154, 103, 0, 0.35);
 
-    --state-low-bar: #cf222e;
-    --state-low-text: #a40e26;
-    --state-low-edge: rgba(207, 34, 46, 0.3);
+  --state-low-bar: #cf222e;
+  --state-low-text: #a40e26;
+  --state-low-edge: rgba(207, 34, 46, 0.4);
 
-    --state-spent-bar: #cf222e;
-    --state-spent-text: #a40e26;
-    --state-spent-edge: rgba(207, 34, 46, 0.4);
-  }
+  --state-spent-bar: #cf222e;
+  --state-spent-text: #a40e26;
+  --state-spent-edge: rgba(207, 34, 46, 0.5);
 }
 
 * {
@@ -352,7 +365,7 @@ textarea {
   border-radius: var(--radius-sm);
   padding: var(--sp-1) var(--sp-2);
   color: var(--text-secondary);
-  background: var(--overlay-hover);
+  background: var(--chip-bg);
 }
 
 .scroll {

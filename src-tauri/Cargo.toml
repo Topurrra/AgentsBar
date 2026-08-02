@@ -1,6 +1,6 @@
 [package]
 name = "agentsbar"
-version = "0.4.0"
+version = "0.5.0"
 description = "AI coding provider usage limits in the Windows system tray"
 authors = ["AgentsBar"]
 edition = "2021"
@@ -50,6 +50,11 @@ windows = { version = "0.61.3", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_Com_StructuredStorage",
+    # CLI `status` subcommand: attach to the invoking terminal and detect redirection.
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    # Rounded window corners on Windows 11 (DWM corner preference).
+    "Win32_Graphics_Dwm",
 ] }
 # HKCU only: drop the pre-rename autostart value, and read the NSIS uninstall key so the
 # in-app updater can tell an installed copy from a portable one. Already compiled in the

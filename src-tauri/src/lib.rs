@@ -8,6 +8,7 @@ pub mod state;
 pub mod tray;
 pub mod updater;
 
+pub mod cli;
 mod redact;
 
 use tauri::Manager;

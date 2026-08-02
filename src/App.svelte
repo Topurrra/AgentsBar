@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { call, getHistory, hidePopover } from "./lib/api.js";
+  import { costSummary } from "./lib/tiles.js";
+  import { usd } from "./lib/format.js";
   import Usage from "./lib/Usage.svelte";
   import Settings from "./lib/Settings.svelte";
 
@@ -13,10 +15,27 @@
   let view = $state("usage");
   let now = $state(Date.now());
   let refreshing = $state(false);
+  // Sparkline window, "24h" or "7d". A view preference, not a setting: it lives here
+  // (not in Usage) so it survives a round trip through Settings, and resets on restart.
+  let sparkWindow = $state("24h");
+  // Tile density, "wide" (full tiles) or "compact" (one line each). Same reasoning: a
+  // view preference that outlives a Settings round trip.
+  let density = $state("wide");
 
   const enabled = $derived(
     providers.filter((p) => config?.providers?.[p.id]?.enabled),
   );
+
+  // Aggregated USD across every provider, shown in the header. null when nothing reports
+  // dollars, so the header stays clean.
+  const cost = $derived(costSummary(snapshots));
+  const costLabel = $derived.by(() => {
+    if (!cost) return "";
+    const parts = [];
+    if (cost.hasSpend) parts.push(`${usd(cost.spend)} spent`);
+    if (cost.hasBalance) parts.push(`${usd(cost.balance)} balance`);
+    return parts.join(" · ");
+  });
 
   // Row 20: a tile is stale once it is older than two refresh intervals. One missed
   // cycle is normal; two means the number on screen is not what the tile implies.
@@ -59,6 +78,30 @@
     await loadConfig();
   }
 
+  // The theme choice ("auto" | "dark" | "light") resolves to a concrete scheme on the
+  // <html> data-theme attribute. "auto" follows the OS via matchMedia and re-resolves
+  // when the OS changes; the popover is hidden until JS has run, so there is no flash.
+  const systemLight = matchMedia("(prefers-color-scheme: light)");
+  function applyTheme(theme) {
+    const resolved =
+      theme === "light"
+        ? "light"
+        : theme === "dark"
+          ? "dark"
+          : systemLight.matches
+            ? "light"
+            : "dark";
+    document.documentElement.dataset.theme = resolved;
+  }
+  $effect(() => applyTheme(config?.theme ?? "auto"));
+
+  function cycleTheme() {
+    const order = ["auto", "dark", "light"];
+    const current = config?.theme ?? "auto";
+    const next = order[(order.indexOf(current) + 1) % order.length];
+    saveConfig({ ...config, theme: next });
+  }
+
   async function refreshAll() {
     if (refreshing) return;
     refreshing = true;
@@ -88,6 +131,12 @@
       else hidePopover();
     };
     window.addEventListener("keydown", onKey);
+
+    // In auto mode the OS can change scheme out from under us; re-resolve. A forced
+    // choice ignores this, so the listener only matters while theme is "auto"/unset.
+    const onScheme = () => applyTheme(config?.theme ?? "auto");
+    systemLight.addEventListener("change", onScheme);
+
     const subs = [
       listen("usage-updated", (e) => {
         if (Array.isArray(e.payload)) snapshots = e.payload;
@@ -99,6 +148,7 @@
     return () => {
       clearInterval(tick);
       window.removeEventListener("keydown", onKey);
+      systemLight.removeEventListener("change", onScheme);
       for (const s of subs) s.then((un) => un()).catch(() => {});
     };
   });
@@ -130,6 +180,16 @@
           <path d="M11.5 3.5 6 8l5.5 4.5" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </button>
+    {:else if costLabel}
+      <!-- Aggregated USD, up here rather than in the footer so the action strip stays
+           uncluttered. Dim on purpose: it is context, not something to act on. -->
+      <span
+        class="cost"
+        data-tauri-drag-region
+        title="Aggregated from providers that report USD — OpenAI spend (last 30 days); DeepSeek, OpenRouter, xAI and OpenAI remaining balance"
+      >
+        {costLabel}
+      </span>
     {/if}
   </header>
 
@@ -146,9 +206,14 @@
       {staleMs}
       pinned={config?.pinned_provider ?? null}
       ready={config !== null}
+      {sparkWindow}
+      onSparkWindow={(w) => (sparkWindow = w)}
+      {density}
+      onDensity={(d) => (density = d)}
       onRefresh={refreshAll}
       onRetry={retry}
       onSettings={() => (view = "settings")}
+      onThemeChange={cycleTheme}
       onQuit={() => call("quit_app")}
     />
   {/if}
@@ -193,6 +258,17 @@
     font-weight: var(--weight-bold);
     letter-spacing: 0.2px;
     color: var(--text-primary);
+  }
+
+  .cost {
+    flex: none;
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--type-meta);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
   }
 
   .gap {

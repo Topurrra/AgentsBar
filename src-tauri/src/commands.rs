@@ -79,17 +79,27 @@ pub async fn get_cadence_secs(state: State<'_, AppState>) -> Result<i64, String>
 pub async fn set_config(app: AppHandle, mut config: Config) -> Result<(), String> {
     config.normalize();
     let launch_at_startup = config.launch_at_startup;
-    {
+    let new_proxy = config.proxy_url.clone();
+    let proxy_changed = {
         let state = app.state::<AppState>();
         let mut current = state.config.write().await;
+        let changed = current.proxy_url != new_proxy;
         // The incoming copy is redacted and may be stale, so keys stay as stored.
         config.merge_keys_from(&current);
         config.save().map_err(|e| e.to_string())?;
         *current = config;
-    }
+        changed
+    };
     // A changed cookie source or browser must not be answered from the memo.
     crate::cookies::invalidate();
     crate::tray::apply_autostart(&app, launch_at_startup);
+    // A new proxy takes effect from the next request, so rebuild the client before the
+    // refresh below goes out through it.
+    if proxy_changed {
+        app.state::<AppState>()
+            .set_proxy(new_proxy.as_deref())
+            .await;
+    }
     // Refreshing also restarts the scheduler countdown, so a new interval applies now.
     crate::scheduler::refresh_now(&app).await;
     Ok(())

@@ -111,6 +111,7 @@ impl Provider for Xai {
 
         let mut snapshot = UsageSnapshot::new(self.id());
         snapshot.credits = Some(balance_usd(&envelope.total.val)?);
+        snapshot.credits_unit = Some("USD".to_string());
         snapshot.plan = Some("Prepaid".to_string());
         Ok(snapshot)
     }

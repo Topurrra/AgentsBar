@@ -304,7 +304,7 @@ async fn refresh_scheduled(app: &AppHandle) -> bool {
 
 async fn refresh_all_locked(app: &AppHandle, user_initiated: bool) -> bool {
     let state = app.state::<AppState>();
-    let http = state.http.clone();
+    let http = state.http.read().await.clone();
     let config = state.config.read().await.clone();
 
     // `is_configured` does blocking file IO for the cookie providers (a cold scan copies
@@ -713,6 +713,8 @@ async fn publish(app: &AppHandle) {
     // Row 25: same shape as `commands::get_snapshots`, so the tile renders the clamped
     // lanes whether it polled or was pushed to. These two must always change together.
     let display: Vec<crate::state::DisplaySnapshot> = snapshots.iter().map(Into::into).collect();
+    // Persist for the CLI `status` command, which reads this file rather than the app.
+    crate::state::persist_display(&display);
     if let Err(e) = app.emit("usage-updated", &display) {
         log::warn!("usage-updated emit failed: {e}");
     }

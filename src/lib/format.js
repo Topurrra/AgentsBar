@@ -43,6 +43,13 @@ export function credits(value) {
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
+// A US dollar amount for the cost summary. Always two places, so "$8" reads as "$8.00"
+// and a balance lines up with the spend next to it.
+export function usd(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value.toLocaleString(undefined, { style: "currency", currency: "USD" });
+}
+
 // The footer's "refreshed at" is the OLDEST fetched_at, not the newest: see
 // oldestFetch in tiles.js. A newest-of helper used to live here and is gone on purpose,
 // because the two read identically at a call site and only one of them is honest.

@@ -1,6 +1,6 @@
 // Run: node src/lib/tiles.test.js
 import assert from "node:assert/strict";
-import { urgency, sortTiles, oldestFetch, ago, pace, errorCopy } from "./tiles.js";
+import { urgency, sortTiles, oldestFetch, ago, pace, errorCopy, costSummary } from "./tiles.js";
 
 const t0 = Date.parse("2026-01-01T00:00:00Z");
 const iso = (min) => new Date(t0 + min * 60000).toISOString();
@@ -220,5 +220,43 @@ assert.equal(
   errorCopy({ name: "Nowhere", auth: "api_key" }, err("auth")).text,
   "Nowhere rejected the saved key. Get a new one and paste it in Settings.",
 );
+
+// --- cost summary -----------------------------------------------------------------
+
+// Nothing reports dollars: no line at all.
+assert.equal(costSummary([]), null);
+assert.equal(costSummary([{ credits: 5 }]), null, "a unitless balance is not money");
+assert.equal(
+  costSummary([{ credits: 5, credits_unit: "CNY" }]),
+  null,
+  "a CNY wallet is not folded into the dollar total",
+);
+
+// Spend (OpenAI) and USD balances aggregate; the CNY wallet and the token count stay out.
+const money = costSummary([
+  { spend_usd: 12.5 },
+  { credits: 20, credits_unit: "USD" },
+  { credits: 3.5, credits_unit: "USD" },
+  { credits: 99, credits_unit: "CNY" },
+  { credits: 100000 },
+]);
+assert.equal(money.hasSpend, true);
+assert.equal(money.hasBalance, true);
+assert.equal(money.spend, 12.5);
+assert.equal(money.balance, 23.5, "only USD balances sum");
+
+// Spend only, and balance only, each surface on their own.
+assert.deepEqual(costSummary([{ spend_usd: 4 }]), {
+  spend: 4,
+  balance: 0,
+  hasSpend: true,
+  hasBalance: false,
+});
+assert.deepEqual(costSummary([{ credits: 7, credits_unit: "USD" }]), {
+  spend: 0,
+  balance: 7,
+  hasSpend: false,
+  hasBalance: true,
+});
 
 console.log("tiles.js ok");

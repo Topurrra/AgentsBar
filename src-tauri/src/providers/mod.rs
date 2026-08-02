@@ -89,6 +89,17 @@ pub struct UsageSnapshot {
     pub secondary: Option<UsageWindow>,
     pub tertiary: Option<UsageWindow>,
     pub credits: Option<f64>,
+    /// The unit `credits` is denominated in, when known ("USD", "CNY", ...). The cost
+    /// summary only aggregates credits whose unit is "USD", so a CNY balance or a token
+    /// count is never silently added to a dollar total. `None` means the unit is unknown
+    /// or `credits` is not a currency, and is left out of the money math.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits_unit: Option<String>,
+    /// Real USD billed over the provider's trailing reporting window (OpenAI's last 30
+    /// days). A SPEND, not a balance: it is what left the account, distinct from `credits`
+    /// which is what remains. Aggregated separately in the cost summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_usd: Option<f64>,
     pub plan: Option<String>,
     pub account: Option<String>,
     /// Row 35. A stable, non-PII identity for the account these numbers belong to, when
@@ -117,6 +128,8 @@ impl UsageSnapshot {
             secondary: None,
             tertiary: None,
             credits: None,
+            credits_unit: None,
+            spend_usd: None,
             plan: None,
             account: None,
             account_key: None,
@@ -440,6 +453,11 @@ pub fn all_providers() -> Vec<Box<dyn Provider>> {
 
 pub fn provider_by_id(id: &str) -> Option<Box<dyn Provider>> {
     all_providers().into_iter().find(|p| p.id() == id)
+}
+
+/// The display name for a provider id, falling back to the id itself for an unknown one.
+pub fn provider_name(id: &str) -> String {
+    provider_by_id(id).map_or_else(|| id.to_string(), |p| p.name().to_string())
 }
 
 #[cfg(test)]

@@ -27,9 +27,26 @@ if you say yes.
 
 - Tray icon with percent left for your pinned provider, or a countdown when it is spent
 - Popover with a tile per provider: usage bars, reset countdowns, credits, plan, pace
-  ("runs out in 1d 21h"), and a 24h sparkline
+  ("runs out in 1d 21h"), and a 24h / 7d sparkline
 - Tiles sorted by whatever is closest to running out
 - Right click for refresh, settings, launch at startup, updates
+
+## Command line
+
+The same exe doubles as a CLI, so you can script it or pipe it into other tools. It reads
+the numbers the tray already collected (no extra requests to the providers).
+
+```powershell
+agentsbar status            # every provider's current usage, one per line
+agentsbar status --json     # the same data as JSON
+agentsbar --version
+agentsbar --help
+```
+
+`status` shows a glyph per provider (`✓` plenty, `!` getting low, `×` exhausted or error,
+`◆` a dollar figure, `-` no data yet), the headline number, when it resets, and a total of
+USD spend and balance across the providers that report dollars. Run it from a terminal;
+colours switch off automatically when you redirect (`agentsbar status --json | jq`).
 
 ## Providers
 
