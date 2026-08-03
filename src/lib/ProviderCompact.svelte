@@ -1,6 +1,6 @@
 <script>
   // The compact row: one provider per line for scanning many at once. It trades the
-  // tile's detail (every lane, pace, sparkline) for density — icon, name, the binding
+  // tile's detail (every lane, pace, sparkline) for density: icon, name, the binding
   // window as a thin bar, the percent, and the reset. Same state ramp as the tile, so a
   // list of rows reads for trouble exactly the way the tiles do.
   import { percentLeft, tone, countdown } from "./format.js";
@@ -9,9 +9,10 @@
   import { openUrl } from "./api.js";
   import ProviderIcon from "./ProviderIcon.svelte";
 
-  let { provider, snapshot, now, cookieSource = null } = $props();
+  let { provider, snapshot, now, cookieSource = null, recommended = false, onRetry } = $props();
 
   const fail = $derived(errorCopy(provider, snapshot, cookieSource));
+  const retryable = $derived(!!fail?.retry && typeof onRetry === "function");
   const windows = $derived(windowsOf(snapshot));
 
   const RAMP = { ok: "calm", warn: "watch", bad: "low", unknown: "unknown" };
@@ -43,25 +44,37 @@
   });
 
   const accentSoft = $derived(providerAccent(provider.id) + "40");
+
+  function activate() {
+    if (retryable) onRetry(provider.id);
+    else openUrl(provider.doc_url);
+  }
 </script>
 
 <button
   class="row {state}"
+  class:rec={recommended}
   style="--accent-soft: {accentSoft}"
-  title={snapshot?.account ?? provider.name}
-  onclick={() => openUrl(provider.doc_url)}
-  disabled={!provider.doc_url}
+  title={retryable ? "Retry " + provider.name : (snapshot?.account ?? provider.name)}
+  aria-label={retryable ? "Retry " + provider.name : (snapshot?.account ?? provider.name)}
+  onclick={activate}
+  disabled={!retryable && !provider.doc_url}
 >
   <ProviderIcon id={provider.id} size={15} />
-  <span class="name">{provider.name}</span>
+  <span class="identity">
+    <span class="name">{provider.name}</span>
+    {#if recommended}
+      <span class="rec-tag">most room</span>
+    {/if}
+  </span>
 
   {#if fail}
-    <span class="detail err" title={snapshot.error}>{fail.text}</span>
+    <span class="detail err {fail.tone}" title={snapshot.error}>{fail.text}</span>
   {:else if lead}
     <span class="bar" aria-hidden="true">
       <span class="fill" style="--v: {(left ?? 100) / 100}"></span>
     </span>
-    <span class="pct">{left === null ? "—" : left + "%"}</span>
+    <span class="pct">{left === null ? "?" : left + "%"}</span>
     <span class="reset">
       {lead.resets_at ? countdown(lead.resets_at, now) : ""}
     </span>
@@ -76,14 +89,13 @@
     align-items: center;
     gap: var(--sp-3);
     width: 100%;
-    padding: var(--sp-3) var(--sp-4);
+    min-width: 0;
+    padding: var(--sp-2) var(--sp-4);
     border-radius: var(--radius-md);
     text-align: left;
-    /* A real card, not a bare line: the raised surface and hairline make each row read
-       as its own object in both themes, exactly like the wide tile it condenses. */
-    background: var(--surface-raised);
+    background: linear-gradient(135deg, var(--overlay-hover), var(--surface-float-raised));
     border: 1px solid var(--border);
-    /* One hairline of the brand color down the left, same accent as the wide tile. */
+    /* Brand is identity only; urgency remains on the meter and percentage. */
     box-shadow: inset 2px 0 0 var(--accent-soft);
     transition:
       background var(--motion-fast) var(--ease),
@@ -91,7 +103,7 @@
   }
 
   .row:not(:disabled):hover {
-    background: var(--surface-raised-hover);
+    background: linear-gradient(135deg, var(--overlay-hover), var(--surface-raised-hover));
     border-color: var(--border-strong);
   }
 
@@ -99,8 +111,21 @@
     cursor: default;
   }
 
-  .name {
+  .row.rec {
+    border-color: var(--state-calm-bar);
+    box-shadow: inset 2px 0 0 var(--state-calm-bar);
+  }
+
+  .identity {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1);
     flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .name {
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -108,6 +133,17 @@
     font-size: var(--type-body);
     font-weight: var(--weight-medium);
     color: var(--text-primary);
+  }
+
+  .rec-tag {
+    flex: none;
+    padding: var(--sp-1) var(--sp-2);
+    border-radius: var(--radius-sm);
+    background: var(--chip-bg);
+    color: var(--state-calm-text);
+    font-size: var(--type-meta);
+    line-height: var(--leading-tight);
+    white-space: nowrap;
   }
 
   /* The bar and the percent carry the state colour; the name stays neutral and the
@@ -158,8 +194,20 @@
     font-size: var(--type-meta);
   }
 
-  .err {
+  .row > :last-child {
+    min-width: 0;
+  }
+
+  .err.bad {
     color: var(--state-low-text);
+  }
+
+  .err.warn {
+    color: var(--state-watch-text);
+  }
+
+  .err.muted {
+    color: var(--text-secondary);
   }
 
   .none {

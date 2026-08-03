@@ -25,6 +25,12 @@ static POPOVER_AT: AtomicI64 = AtomicI64::new(0);
 /// failure". A `Vec` rather than a `HashSet` because `Vec::new` is const and 23 providers
 /// is not a lookup problem.
 static GRACED: Mutex<Vec<String>> = Mutex::const_new(Vec::new());
+/// Advisor. Providers whose lead window dipped to or below the alert threshold and has
+/// not recovered since. Membership, not a counter, like [`GRACED`] and for the same
+/// reasons: `Vec::new` is const, and the only question is "did this dip already announce
+/// itself". Cleared when a provider recovers above the threshold (or the feature turns
+/// off), so the next crossing fires again.
+static ALERTED: Mutex<Vec<String>> = Mutex::const_new(Vec::new());
 /// Only one refresh at a time. Codex, Claude and Gemini rotate a single use OAuth
 /// refresh token during a fetch, so two overlapping refreshes would race to persist
 /// it and leave a dead token behind.
@@ -546,7 +552,14 @@ async fn store(app: &AppHandle, id: &str, result: Result<UsageSnapshot, Provider
         }
     }
 
-    let notify_on_exhaustion = state.config.read().await.notify_on_exhaustion;
+    let (notify_on_exhaustion, alert_below, quiet_now) = {
+        let cfg = state.config.read().await;
+        (
+            cfg.notify_on_exhaustion,
+            cfg.alert_below_percent,
+            cfg.quiet_now(),
+        )
+    };
 
     let mut snapshots = state.snapshots.write().await;
     let previous = snapshots.get(id).cloned();
@@ -568,6 +581,9 @@ async fn store(app: &AppHandle, id: &str, result: Result<UsageSnapshot, Provider
         }
     };
     let merged = merge(id, previous.as_ref(), result, graced);
+    // Health of the STORED snapshot: a graced blip keeps the previous good numbers, so it
+    // reads as healthy here exactly as it does on the tile.
+    let healthy = merged.error.is_none();
 
     let notify_info = if notify_on_exhaustion
         && !previous.as_ref().is_some_and(is_lead_exhausted)
@@ -580,11 +596,43 @@ async fn store(app: &AppHandle, id: &str, result: Result<UsageSnapshot, Provider
         None
     };
 
+    // Advisor. The exhaustion toast's softer sibling: the same trigger point, a stored
+    // snapshot transition, and the same toast mechanism, but it fires when the lead
+    // window's remaining quota crosses DOWN through the user's threshold, and it honours
+    // quiet hours. Runs even when the feature is off, because the membership record must
+    // keep tracking recoveries: a stale "already announced" left behind while the feature
+    // was off would swallow the first real crossing after it turns back on.
+    let alert_info = {
+        let mut alerted = ALERTED.lock().await;
+        let fired = advisor_should_fire(
+            alert_below,
+            quiet_now,
+            previous.as_ref(),
+            &merged,
+            id,
+            &mut alerted,
+        );
+        fired.then(|| {
+            let name = provider_by_id(id).map(|p| p.name()).unwrap_or(id);
+            let resets_at = crate::state::lead_window(&merged).and_then(|w| w.resets_at);
+            (
+                name,
+                alert_below.expect("an alert only fires with a threshold set"),
+                resets_at,
+            )
+        })
+    };
+
     snapshots.insert(id.to_string(), merged);
     drop(snapshots);
 
+    state.record_health(id, healthy).await;
+
     if let Some((name, resets_at)) = notify_info {
         notify_exhausted(app, name, resets_at);
+    }
+    if let Some((name, threshold, resets_at)) = alert_info {
+        notify_below_threshold(app, name, threshold, resets_at);
     }
 }
 
@@ -593,37 +641,99 @@ fn is_lead_exhausted(snapshot: &UsageSnapshot) -> bool {
     crate::state::lead_window(snapshot).is_some_and(|w| w.used_percent.is_some_and(|u| u >= 100.0))
 }
 
+/// Advisor. Remaining percent of the lead window, when the provider reports one. The
+/// threshold math runs on remaining, which is what the user thinks in, not on used.
+fn lead_remaining(snapshot: &UsageSnapshot) -> Option<f64> {
+    crate::state::lead_window(snapshot)
+        .and_then(|w| w.used_percent)
+        .map(|used| 100.0 - used)
+}
+
+/// Advisor. One provider's alert decision for a stored snapshot, pure so every branch is
+/// a unit test. `alerted` is the [`ALERTED`] membership; the call maintains it (records a
+/// dip, clears a recovery) and returns whether a toast should fire.
+///
+/// Firing needs a genuine crossing: the previous remaining ABOVE the threshold and the
+/// new remaining at or below it. A first observation already below has nothing it
+/// crossed, and a quiet hour consumes the crossing rather than delivering it stale, which
+/// is what quiet hours are for. An exhausted lead is exempt: the exhaustion toast owns
+/// that transition and fires from the same one.
+fn advisor_should_fire(
+    threshold: Option<u8>,
+    quiet: bool,
+    previous: Option<&UsageSnapshot>,
+    current: &UsageSnapshot,
+    id: &str,
+    alerted: &mut Vec<String>,
+) -> bool {
+    // Off is off, but the membership still tracks recoveries, so turning the feature
+    // back on never inherits a stale "already announced".
+    let Some(limit) = threshold.map(f64::from) else {
+        alerted.retain(|seen| seen != id);
+        return false;
+    };
+    let below = lead_remaining(current).is_some_and(|r| r <= limit);
+    if !below || is_lead_exhausted(current) {
+        // Above the threshold again, exhausted, or no percent to judge by: re-arm.
+        alerted.retain(|seen| seen != id);
+        return false;
+    }
+    if alerted.iter().any(|seen| seen == id) {
+        return false; // this dip already announced itself
+    }
+    alerted.push(id.to_string());
+    let crossed = previous.is_some_and(|prev| lead_remaining(prev).is_some_and(|r| r > limit));
+    crossed && !quiet
+}
+
+/// The countdown phrasing both toasts share: how long until the quota rolls over, or
+/// nothing when there is no reset ahead (unknown, or already past).
+fn resets_in(resets_at: Option<DateTime<Utc>>) -> Option<String> {
+    let secs = resets_at.map(|at| (at - Utc::now()).num_seconds())?;
+    if secs <= 0 {
+        return None;
+    }
+    Some(if secs >= 86_400 {
+        format!("Resets in {}d {}h.", secs / 86_400, (secs % 86_400) / 3_600)
+    } else if secs >= 3_600 {
+        format!("Resets in {}h {}m.", secs / 3_600, (secs % 3_600) / 60)
+    } else {
+        format!("Resets in {}m.", secs / 60)
+    })
+}
+
 /// Show a Windows toast notification when a provider hits 0%.
 fn notify_exhausted(app: &AppHandle, name: &str, resets_at: Option<DateTime<Utc>>) {
     use tauri_plugin_notification::NotificationExt;
-    let body = match resets_at {
-        Some(at) => {
-            let now = Utc::now();
-            let secs = (at - now).num_seconds().max(0);
-            if secs >= 86_400 {
-                format!(
-                    "Usage limit reached. Resets in {}d {}h.",
-                    secs / 86_400,
-                    (secs % 86_400) / 3_600
-                )
-            } else if secs >= 3_600 {
-                format!(
-                    "Usage limit reached. Resets in {}h {}m.",
-                    secs / 3_600,
-                    (secs % 3_600) / 60
-                )
-            } else if secs > 0 {
-                format!("Usage limit reached. Resets in {}m.", secs / 60)
-            } else {
-                "Usage limit reached.".to_string()
-            }
-        }
+    let body = match resets_in(resets_at) {
+        Some(countdown) => format!("Usage limit reached. {countdown}"),
         None => "Usage limit reached.".to_string(),
     };
     if let Err(e) = app
         .notification()
         .builder()
         .title(format!("{name} is exhausted"))
+        .body(&body)
+        .show()
+    {
+        log::warn!("notification failed: {e}");
+    }
+}
+
+/// Show a Windows toast when the lead window's remaining quota first crosses below the
+/// user's alert threshold. The title carries the number, the body the countdown.
+fn notify_below_threshold(
+    app: &AppHandle,
+    name: &str,
+    threshold: u8,
+    resets_at: Option<DateTime<Utc>>,
+) {
+    use tauri_plugin_notification::NotificationExt;
+    let body = resets_in(resets_at).unwrap_or_else(|| "Reset time unknown.".to_string());
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title(format!("{name} is below {threshold}%"))
         .body(&body)
         .show()
     {
@@ -1058,5 +1168,199 @@ mod tests {
             battery_saver(),
             "the probe is a read, not a toggle"
         );
+    }
+
+    // --------------------------------------------------------------- advisor, alerts
+
+    /// The advisor fires on the way down through the threshold and exactly once per dip:
+    /// staying below is silent, recovering above the threshold clears the record and
+    /// re-arms, and the next crossing fires again. Exactly-at-the-threshold counts as
+    /// below, because the setting says "drops below or to".
+    #[test]
+    fn the_advisor_fires_once_per_dip_and_rearms_on_recovery() {
+        let mut alerted = Vec::new();
+        let threshold = Some(20);
+        let above = ok(70.0).unwrap(); // 30% remaining
+        let below = ok(85.0).unwrap(); // 15% remaining
+        let deeper = ok(95.0).unwrap(); // 5% remaining
+
+        assert!(advisor_should_fire(
+            threshold,
+            false,
+            Some(&above),
+            &below,
+            "codex",
+            &mut alerted
+        ));
+        assert_eq!(alerted, vec!["codex".to_string()]);
+
+        assert!(
+            !advisor_should_fire(
+                threshold,
+                false,
+                Some(&below),
+                &deeper,
+                "codex",
+                &mut alerted
+            ),
+            "staying below does not re-fire"
+        );
+
+        assert!(
+            !advisor_should_fire(
+                threshold,
+                false,
+                Some(&deeper),
+                &above,
+                "codex",
+                &mut alerted
+            ),
+            "the recovery itself is silent"
+        );
+        assert!(alerted.is_empty(), "recovery clears the record");
+
+        assert!(
+            advisor_should_fire(
+                threshold,
+                false,
+                Some(&above),
+                &below,
+                "codex",
+                &mut alerted
+            ),
+            "the next dip fires again"
+        );
+
+        // Landing exactly on the threshold is at-or-below: 30% remaining crossing into 20%.
+        let mut exact = Vec::new();
+        let at = ok(80.0).unwrap(); // 20% remaining
+        assert!(advisor_should_fire(
+            threshold,
+            false,
+            Some(&above),
+            &at,
+            "codex",
+            &mut exact
+        ));
+    }
+
+    /// Everything that must stay silent: quiet hours consume a crossing (and the consumed
+    /// dip does not fire once they end), the feature off fires nothing and clears stale
+    /// records, a first observation has nothing it crossed, an exhausted lead belongs to
+    /// the exhaustion toast, and a lead without a percent is not judged at all.
+    #[test]
+    fn the_advisor_stays_silent_off_quiet_exhausted_and_without_a_crossing() {
+        let (above, below) = (ok(70.0).unwrap(), ok(85.0).unwrap());
+
+        // Quiet hours consume the crossing rather than delivering it stale at the end of
+        // the window, and the record it leaves stops the re-fire afterwards.
+        let mut quieted = Vec::new();
+        assert!(!advisor_should_fire(
+            Some(20),
+            true,
+            Some(&above),
+            &below,
+            "codex",
+            &mut quieted
+        ));
+        assert_eq!(quieted.len(), 1, "consumed, not lost: the dip is recorded");
+        assert!(!advisor_should_fire(
+            Some(20),
+            false,
+            Some(&above),
+            &below,
+            "codex",
+            &mut quieted
+        ));
+
+        // Off is off, and turning it off clears a record left underneath.
+        let mut stale = vec!["codex".to_string()];
+        assert!(!advisor_should_fire(
+            None,
+            false,
+            Some(&above),
+            &below,
+            "codex",
+            &mut stale
+        ));
+        assert!(stale.is_empty(), "off re-arms everything");
+
+        // A first observation already below never crossed anything, but it is recorded,
+        // so it cannot fire retroactively either.
+        let mut fresh = Vec::new();
+        assert!(!advisor_should_fire(
+            Some(20),
+            false,
+            None,
+            &below,
+            "codex",
+            &mut fresh
+        ));
+        assert_eq!(fresh.len(), 1);
+
+        // Exhausted is the exhaustion toast's transition, even though 0% is below any
+        // threshold, and the exempt transition records nothing.
+        let mut whole = Vec::new();
+        let exhausted = ok(100.0).unwrap();
+        assert!(!advisor_should_fire(
+            Some(20),
+            false,
+            Some(&above),
+            &exhausted,
+            "codex",
+            &mut whole
+        ));
+        assert!(whole.is_empty());
+
+        // No known percent, no judgement; an unknown percent re-arms like a recovery.
+        let unknown = UsageSnapshot::new("codex");
+        let mut rearm = vec!["codex".to_string()];
+        assert!(!advisor_should_fire(
+            Some(20),
+            false,
+            Some(&above),
+            &unknown,
+            "codex",
+            &mut rearm
+        ));
+        assert!(rearm.is_empty());
+
+        // Providers are tracked separately: one provider's dip does not silence another.
+        let mut multi = Vec::new();
+        assert!(advisor_should_fire(
+            Some(20),
+            false,
+            Some(&above),
+            &below,
+            "codex",
+            &mut multi
+        ));
+        assert!(advisor_should_fire(
+            Some(20),
+            false,
+            Some(&above),
+            &below,
+            "claude",
+            &mut multi
+        ));
+        assert_eq!(multi.len(), 2);
+    }
+
+    /// The shared countdown phrasing: the same rungs the exhaustion toast always had.
+    /// Each value sits in the MIDDLE of its displayed bucket, because `resets_in` reads
+    /// the clock a few milliseconds after the test builds its instant, and a value on a
+    /// bucket edge would truncate into the bucket below.
+    #[test]
+    fn the_reset_countdown_uses_the_largest_unit_that_fits() {
+        let ahead = |secs: i64| Some(Utc::now() + chrono::Duration::seconds(secs));
+        assert_eq!(
+            resets_in(ahead(91_800)).as_deref(),
+            Some("Resets in 1d 1h.")
+        );
+        assert_eq!(resets_in(ahead(7_410)).as_deref(), Some("Resets in 2h 3m."));
+        assert_eq!(resets_in(ahead(330)).as_deref(), Some("Resets in 5m."));
+        assert_eq!(resets_in(ahead(0)), None, "a reset now is no countdown");
+        assert_eq!(resets_in(ahead(-60)), None, "a past reset is no countdown");
+        assert_eq!(resets_in(None), None);
     }
 }

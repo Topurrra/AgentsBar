@@ -13,6 +13,9 @@
     now,
     staleMs = 600000,
     cookieSource = null,
+    multi = false,
+    outages = 0,
+    recommended = false,
     onRetry,
   } = $props();
 
@@ -73,30 +76,51 @@
      must not look like something the user has to act on. -->
 <div
   class="tile {tileState}"
+  class:rec={recommended}
   class:failed={fail?.tone === "bad"}
   style="--accent-soft: {accentSoft}"
 >
-  <!-- The account is the least useful fact in the tile and used to eat the header, so it
-       is now the name's tooltip and nothing else. -->
+  <!-- The account stays a tooltip for a single-account provider (naming it on the tile
+       would be noise), but is promoted to a visible label once the provider has several
+       accounts in its history, then knowing which one you are looking at matters. -->
   <div class="head">
     <ProviderIcon id={provider.id} size={16} />
-    <button
-      class="name"
-      title={snapshot?.account ?? undefined}
-      onclick={() => openUrl(provider.doc_url)}
-      disabled={!provider.doc_url}
-    >
-      {provider.name}
-    </button>
-    {#if snapshot?.plan}
-      <!-- Shrinks and ellipses; it must never wrap and push the row to two lines. -->
-      <span class="chip badge" title={snapshot.plan}>{snapshot.plan}</span>
-    {/if}
+    <span class="identity">
+      <button
+        class="name"
+        title={snapshot?.account ?? undefined}
+        onclick={() => openUrl(provider.doc_url)}
+        disabled={!provider.doc_url}
+      >
+        {provider.name}
+      </button>
+      <span class="badges">
+        {#if recommended}
+          <span class="rec-tag">most room</span>
+        {/if}
+        {#if multi && snapshot?.account}
+          <span class="account" title={snapshot.account}>{snapshot.account}</span>
+        {/if}
+        {#if snapshot?.plan}
+          <!-- Shrinks and ellipses; it must never wrap and push the row to two lines. -->
+          <span class="chip badge" title={snapshot.plan}>{snapshot.plan}</span>
+        {/if}
+      </span>
+    </span>
     <span class="gap"></span>
     {#if stale}
       <span class="stale" title="Last fetched {snapshot.fetched_at}">{stale}</span>
     {/if}
   </div>
+
+  <!-- Reliability note, only when there is something to report: this provider went down
+       N times in the last 7 days. Amber, not red; a history of blips is a caution, and
+       the current state already has its own voice below. -->
+  {#if outages > 0}
+    <div class="health">
+      ↓ {outages} outage{outages === 1 ? "" : "s"} in the last 7 days
+    </div>
+  {/if}
 
   <!-- The raw backend string stays on the title attribute: useless on screen, useful in a
        support thread. -->
@@ -192,17 +216,19 @@
   .tile {
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    background: var(--surface-raised);
+    background: linear-gradient(135deg, var(--overlay-hover), var(--surface-float-raised));
     padding: var(--sp-4) var(--sp-5) var(--sp-5);
     /* One hairline of the brand color down the left edge. That is the whole accent. */
     box-shadow: inset 2px 0 0 var(--accent-soft);
-    transition: background var(--motion-fast) var(--ease);
+    transition:
+      background var(--motion-fast) var(--ease),
+      border-color var(--motion-fast) var(--ease);
   }
 
   /* A gentle lift on hover so the list feels responsive. Kept to the background only:
      the tile is not itself a link (the name is), so the frame and accent stay put. */
   .tile:hover {
-    background: var(--surface-raised-hover);
+    background: linear-gradient(135deg, var(--overlay-hover), var(--surface-raised-hover));
   }
 
   /* The frame is the list-level signal. A calm or unknown tile deliberately has no
@@ -224,18 +250,44 @@
     border-color: var(--state-low-edge);
   }
 
+  .tile.rec {
+    border-color: var(--state-calm-bar);
+    box-shadow: inset 2px 0 0 var(--state-calm-bar);
+  }
+
   .head {
     display: flex;
     align-items: center;
     gap: var(--sp-3);
+    min-width: 0;
   }
 
   .gap {
     flex: 1 1 0;
   }
 
-  .name {
+  .identity {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1);
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .badges {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1);
     flex: none;
+    min-width: 0;
+  }
+
+  .name {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: var(--type-body);
     font-weight: var(--weight-medium);
     color: var(--text-primary);
@@ -247,6 +299,38 @@
 
   .name:disabled {
     cursor: default;
+  }
+
+  .rec-tag {
+    flex: none;
+    padding: var(--sp-1) var(--sp-2);
+    border-radius: var(--radius-sm);
+    background: var(--chip-bg);
+    color: var(--state-calm-text);
+    font-size: var(--type-meta);
+    line-height: var(--leading-tight);
+    white-space: nowrap;
+  }
+
+  /* The active account, named only when the provider has several. Dim and small so it
+     reads as context, and allowed to shrink and ellipsize rather than push the header
+     onto two lines when the plan badge and the account both want room. */
+  .account {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--type-meta);
+    color: var(--text-muted);
+  }
+
+  /* A history of outages is a caution, not a current alarm, so it takes the ramp's
+     amber rather than its red. Only present when the count is non-zero. */
+  .health {
+    margin-top: var(--sp-3);
+    font-size: var(--type-meta);
+    color: var(--state-watch-text);
   }
 
   /* Shape comes from the shared .chip. The only thing the badge adds is the right to

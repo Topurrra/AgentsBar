@@ -25,6 +25,7 @@ export const hidePopover = () => getCurrentWindow().hide().catch(() => {});
 // Wave 2 commands. Thin wrappers so component code never repeats a command name.
 export const listBrowsers = () => call("list_browsers");
 export const getHistory = () => call("get_history");
+export const getHealth = () => call("get_health");
 
 export const setCookieSource = (id, source, browser) =>
   call("set_cookie_source", { id, source, browser: browser || null });

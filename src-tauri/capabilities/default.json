@@ -28,6 +28,7 @@
     "opener:default",
     "opener:allow-open-url",
     "notification:default",
-    "log:default"
+    "log:default",
+    "main-commands"
   ]
 }

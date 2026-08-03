@@ -1,0 +1,27 @@
+[[permission]]
+identifier = "main-commands"
+description = "Commands used by the primary AgentsBar window."
+commands.allow = [
+  "list_providers",
+  "get_snapshots",
+  "refresh_all",
+  "refresh_provider",
+  "get_config",
+  "get_cadence_secs",
+  "set_config",
+  "set_api_key",
+  "quit_app",
+  "toggle_widget",
+  "list_browsers",
+  "set_cookie_source",
+  "set_cookie_header",
+  "get_history",
+  "get_health",
+  "export_diagnostics",
+  "clear_cookie_cache",
+]
+
+[[permission]]
+identifier = "widget-commands"
+description = "Usage data plus the widget's own order and hide actions."
+commands.allow = ["get_config", "list_providers", "get_snapshots", "set_provider_order", "toggle_widget"]

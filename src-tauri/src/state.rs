@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::config::Config;
+pub use crate::health::{HealthLog, HealthPoint};
 pub use crate::history::{History, Sample};
 pub use crate::providers::{
     AuthKind, FetchContext, Provider, ProviderError, ProviderInfo, UsageSnapshot, UsageWindow,
@@ -17,6 +18,9 @@ pub struct AppState {
     pub config: RwLock<Config>,
     /// Sparkline samples, loaded from disk at startup and appended after each refresh.
     pub history: RwLock<History>,
+    /// Provider reliability (down/up transitions), loaded from disk at startup and
+    /// appended whenever a provider's status changes after a refresh.
+    pub health: RwLock<HealthLog>,
     /// Row 23. Per provider "do not call before": set on a rate limit or a server error,
     /// cleared on success. Deliberately not persisted, since a restart is itself a fresh
     /// intent to fetch, and deliberately keyed by provider rather than shared, because a
@@ -75,6 +79,7 @@ impl AppState {
             snapshots: RwLock::new(HashMap::new()),
             config: RwLock::new(config),
             history: RwLock::new(History::load()),
+            health: RwLock::new(HealthLog::load()),
             skip_until: RwLock::new(HashMap::new()),
             http: RwLock::new(http),
         }
@@ -149,6 +154,18 @@ impl AppState {
         if changed {
             if let Err(e) = history.save() {
                 log::warn!("history save failed: {e}");
+            }
+        }
+    }
+
+    /// Record a provider's health outcome, persisting only when its status actually
+    /// changed (see [`HealthLog::record`]). Call after a refresh has stored the snapshot,
+    /// with the health of the STORED snapshot so a graced blip counts as healthy.
+    pub async fn record_health(&self, provider_id: &str, ok: bool) {
+        let mut health = self.health.write().await;
+        if health.record(provider_id, ok) {
+            if let Err(e) = health.save() {
+                log::warn!("health save failed: {e}");
             }
         }
     }

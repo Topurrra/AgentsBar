@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod config;
 pub mod cookies;
+pub mod health;
 pub mod history;
 pub mod providers;
 pub mod scheduler;
@@ -73,14 +74,17 @@ pub fn run() {
             commands::refresh_all,
             commands::refresh_provider,
             commands::get_config,
+            commands::set_provider_order,
             commands::get_cadence_secs,
             commands::set_config,
             commands::set_api_key,
             commands::quit_app,
+            commands::toggle_widget,
             commands::list_browsers,
             commands::set_cookie_source,
             commands::set_cookie_header,
             commands::get_history,
+            commands::get_health,
             commands::export_diagnostics,
             commands::clear_cookie_cache,
         ])

@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::config::{Config, COOKIE_BROWSERS, COOKIE_SOURCES};
+use crate::health::HealthPoint;
 use crate::history::Sample;
 use crate::providers::{all_providers, AuthKind, ProviderInfo, UsageSnapshot, UsageWindow};
 use crate::state::{AppState, DisplaySnapshot};
@@ -59,6 +60,24 @@ pub async fn refresh_provider(app: AppHandle, id: String) -> Result<(), String> 
 pub async fn get_config(state: State<'_, AppState>) -> Result<Config, String> {
     // API keys never leave the backend: the UI only needs ProviderInfo::configured.
     Ok(state.config.read().await.redacted())
+}
+
+#[tauri::command]
+pub async fn set_provider_order(app: AppHandle, order: Vec<String>) -> Result<Vec<String>, String> {
+    let order = {
+        let state = app.state::<AppState>();
+        let mut config = state.config.write().await;
+        let mut next = config.clone();
+        next.provider_order = order;
+        next.normalize();
+        next.save().map_err(|e| e.to_string())?;
+        let order = next.provider_order.clone();
+        *config = next;
+        order
+    };
+    app.emit("provider-order-updated", &order)
+        .map_err(|e| e.to_string())?;
+    Ok(order)
 }
 
 /// Row 20 and row 24. The longest gap the ACTIVE cadence policy can leave between two
@@ -123,6 +142,11 @@ pub async fn set_api_key(app: AppHandle, id: String, key: String) -> Result<(), 
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+#[tauri::command]
+pub fn toggle_widget(app: AppHandle) {
+    crate::tray::toggle_widget(&app);
 }
 
 // ------------------------------------------------------------------ cookies
@@ -232,6 +256,13 @@ pub async fn get_history(
     state: State<'_, AppState>,
 ) -> Result<HashMap<String, Vec<Sample>>, String> {
     Ok(state.history.read().await.series().clone())
+}
+
+#[tauri::command]
+pub async fn get_health(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, Vec<HealthPoint>>, String> {
+    Ok(state.health.read().await.series().clone())
 }
 
 // ------------------------------------------------------------------ diagnostics

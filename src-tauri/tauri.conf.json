@@ -22,8 +22,23 @@
         "visible": false,
         "skipTaskbar": true,
         "alwaysOnTop": true,
-        "shadow": true,
-        "backgroundColor": "#0f0f11"
+        "shadow": false,
+        "transparent": true
+      },
+      {
+        "label": "widget",
+        "title": "AgentsBar",
+        "width": 320,
+        "height": 340,
+        "minWidth": 280,
+        "minHeight": 140,
+        "resizable": true,
+        "decorations": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "shadow": false,
+        "transparent": true
       }
     ],
     "security": {

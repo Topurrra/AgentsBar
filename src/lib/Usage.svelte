@@ -1,23 +1,26 @@
 <script>
   import ProviderTile from "./ProviderTile.svelte";
   import ProviderCompact from "./ProviderCompact.svelte";
+  import CostAdvice from "./CostAdvice.svelte";
+  import Trends from "./Trends.svelte";
   import { clockTime } from "./format.js";
-  import { sortTiles, oldestFetch } from "./tiles.js";
+  import { sortTiles, oldestFetch, recommend, multiAccountProviders, outagesSince } from "./tiles.js";
 
   let {
     providers,
     snapshots,
     history = {},
+    health = {},
     config = null,
     now,
     ready,
     refreshing,
     staleMs = 600000,
-    pinned = null,
     sparkWindow = "24h",
     onSparkWindow,
-    density = "wide",
+    density = "compact",
     onDensity,
+    onWidget,
     onRefresh,
     onRetry,
     onSettings,
@@ -27,8 +30,30 @@
 
   const byId = $derived(new Map(snapshots.map((s) => [s.provider_id, s])));
 
-  // Row 15: most urgent first, so the reason you opened the popover is above the fold.
-  const tiles = $derived(sortTiles(providers, byId, pinned));
+  // Outages in the last 7 days, per provider id. Recomputed whenever health or the clock
+  // tick changes; the tile shows it only when it is non-zero.
+  const outages = $derived.by(() => {
+    const since = now / 1000 - 7 * 86400;
+    const map = {};
+    for (const p of providers) {
+      const n = outagesSince(health[p.id], since);
+      if (n > 0) map[p.id] = n;
+    }
+    return map;
+  });
+
+  const providerOrder = $derived(config?.provider_order ?? []);
+  const tiles = $derived(sortTiles(providers, byId, providerOrder));
+
+  // The provider to reach for next (most headroom). Only surfaced when there is an actual
+  // choice — with a single provider the tile already says everything.
+  const rec = $derived(providers.length >= 2 ? recommend(providers, byId) : null);
+
+  // Providers with more than one account in the history (each series key is one account,
+  // row 35). Only for those does the active account deserve to be named on the tile: a
+  // single-account provider printing its account everywhere is noise, the kind of clutter
+  // "healthy recedes" exists to avoid.
+  const multiAccount = $derived(multiAccountProviders(history));
 
   // Row 20: the stamp is the oldest of the snapshots actually on screen. A single
   // provider still refreshing must not let the footer claim the rest are current.
@@ -64,9 +89,13 @@
             provider={p}
             snapshot={byId.get(p.id)}
             cookieSource={config?.providers?.[p.id]?.cookie_source ?? null}
+            recommended={rec?.provider.id === p.id}
             {now}
+            {onRetry}
           />
         {/each}
+        <CostAdvice {snapshots} />
+        <Trends {history} {providers} {now} />
       </div>
     {:else}
       <div class="tiles">
@@ -79,11 +108,16 @@
             snapshot={byId.get(p.id)}
             samples={samplesFor(byId.get(p.id)?.history_key ?? p.id)}
             cookieSource={config?.providers?.[p.id]?.cookie_source ?? null}
+            multi={multiAccount.has(p.id)}
+            outages={outages[p.id] ?? 0}
+            recommended={rec?.provider.id === p.id}
             {now}
             {staleMs}
             {onRetry}
           />
         {/each}
+        <CostAdvice {snapshots} />
+        <Trends {history} {providers} {now} />
       </div>
     {/if}
   {:else if ready}
@@ -136,6 +170,19 @@
         <rect x="3" y="9.4" width="10" height="3.6" rx="1.2" />
       </svg>
     {/if}
+  </button>
+
+  <button
+    class="iconbtn"
+    title="Toggle desktop widget"
+    aria-label="Toggle desktop widget"
+    onclick={onWidget}
+  >
+    <!-- a small widget tile with a meter inside -->
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+      <rect x="2.5" y="2.5" width="11" height="11" rx="2" />
+      <path d="M5.5 10.5V8M8 10.5V6M10.5 10.5V9" stroke-linecap="round" />
+    </svg>
   </button>
 
   <button
@@ -206,7 +253,7 @@
   .tiles {
     display: flex;
     flex-direction: column;
-    gap: var(--sp-4);
+    gap: var(--sp-3);
     /* 12px of air on both sides, which is also the header's left inset and Settings'
        card inset, so switching views does not shift the cards sideways. The right value
        is one step down because .scroll already reserves a stable 8px scrollbar gutter. */
@@ -219,7 +266,7 @@
   .rows {
     display: flex;
     flex-direction: column;
-    gap: var(--sp-2);
+    gap: var(--sp-1);
     padding: var(--sp-3) var(--sp-2) var(--sp-3) var(--sp-5);
   }
 

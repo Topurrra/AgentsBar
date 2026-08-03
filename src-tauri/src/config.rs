@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -134,19 +134,53 @@ pub struct Config {
     #[serde(default)]
     pub refresh_adaptive: bool,
     pub pinned_provider: Option<String>,
+    /// User's explicit provider order. An empty list uses the live usage ranking.
+    #[serde(default)]
+    pub provider_order: Vec<String>,
     pub providers: HashMap<String, ProviderConfig>,
     pub launch_at_startup: bool,
     pub theme: String,
     #[serde(default = "default_true")]
     pub notify_on_exhaustion: bool,
+    /// Advisor. Notify when a provider's remaining quota first drops to or below this
+    /// percentage. `None`, the default, is OFF: the advisor is opt-in, and a config.json
+    /// written before the field existed has no key, which reads as `None`, so an existing
+    /// install keeps its silence.
+    #[serde(default)]
+    pub alert_below_percent: Option<u8>,
+    /// Advisor. Quiet hours as local hours of the day, 0-23. Alert toasts are suppressed
+    /// inside `[start, end)` when BOTH ends are set; either one `None` means no quiet
+    /// hours. A start after the end wraps midnight (22 to 7 is quiet from 10pm to 7am).
+    #[serde(default)]
+    pub alert_quiet_start: Option<u8>,
+    #[serde(default)]
+    pub alert_quiet_end: Option<u8>,
     /// Optional HTTP(S) proxy all provider requests are routed through, for corporate
     /// networks that egress via one. `None` (the default) is a direct connection.
     #[serde(default)]
     pub proxy_url: Option<String>,
+    /// Last screen position of the desktop widget, so it reopens where it was dragged.
+    /// `None` until the widget has been placed at least once.
+    #[serde(default)]
+    pub widget_x: Option<i32>,
+    #[serde(default)]
+    pub widget_y: Option<i32>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Advisor. `[start, end)` over the hours of a day, wrapping midnight when the start is
+/// after the end. Equal ends are the empty window, which is never quiet: the UI sets
+/// both selects deliberately, and a hand edited file landing both on the same hour must
+/// read as "off", not as "always quiet".
+fn in_quiet_window(start: u8, end: u8, hour: u8) -> bool {
+    if start <= end {
+        (start..end).contains(&hour)
+    } else {
+        hour >= start || hour < end
+    }
 }
 
 impl Default for Config {
@@ -159,11 +193,17 @@ impl Default for Config {
             refresh_minutes: 5,
             refresh_adaptive: true,
             pinned_provider: None,
+            provider_order: vec![],
             providers,
             launch_at_startup: false,
             theme: "auto".to_string(),
             notify_on_exhaustion: true,
+            alert_below_percent: None,
+            alert_quiet_start: None,
+            alert_quiet_end: None,
             proxy_url: None,
+            widget_x: None,
+            widget_y: None,
         }
     }
 }
@@ -218,12 +258,24 @@ impl Config {
     /// The upper bound keeps `refresh_minutes * 60` from overflowing a u64 duration.
     pub fn normalize(&mut self) {
         self.refresh_minutes = self.refresh_minutes.clamp(1, 1440);
+        // Advisor values come from a hand editable file: clamp them the way
+        // `refresh_minutes` is clamped, instead of trusting them.
+        self.alert_below_percent = self.alert_below_percent.map(|p| p.min(100));
+        self.alert_quiet_start = self.alert_quiet_start.map(|h| h.min(23));
+        self.alert_quiet_end = self.alert_quiet_end.map(|h| h.min(23));
         // A blank or whitespace proxy is no proxy at all.
         self.proxy_url = self
             .proxy_url
             .take()
             .map(|p| p.trim().to_string())
             .filter(|p| !p.is_empty());
+        let known = crate::providers::all_providers()
+            .iter()
+            .map(|provider| provider.id())
+            .collect::<HashSet<_>>();
+        let mut seen = HashSet::new();
+        self.provider_order
+            .retain(|id| known.contains(id.as_str()) && seen.insert(id.clone()));
         for provider in self.providers.values_mut() {
             provider.unwrap_secrets();
             // An unknown source would silently disable a provider, so fall back to auto.
@@ -302,6 +354,17 @@ impl Config {
 
     pub fn is_enabled(&self, id: &str) -> bool {
         self.providers.get(id).is_some_and(|p| p.enabled)
+    }
+
+    /// Advisor. Whether alert toasts are suppressed right now. Only active when both
+    /// quiet hour ends are set; the window is `[start, end)` on the LOCAL clock, because
+    /// quiet hours are a sleep schedule, not a UTC interval.
+    pub fn quiet_now(&self) -> bool {
+        use chrono::Timelike;
+        let (Some(start), Some(end)) = (self.alert_quiet_start, self.alert_quiet_end) else {
+            return false;
+        };
+        in_quiet_window(start, end, chrono::Local::now().hour() as u8)
     }
 
     /// Always one of [`COOKIE_SOURCES`]; providers absent from the file default to auto.
@@ -640,6 +703,17 @@ mod tests {
         assert!(again.is_enabled("openrouter"));
     }
 
+    #[test]
+    fn provider_order_only_keeps_known_ids_once() {
+        let cfg =
+            Config::parse(r#"{"provider_order":["claude","not-a-provider","claude","codex"]}"#);
+        let value = serde_json::to_value(cfg).unwrap();
+        assert_eq!(
+            value["provider_order"],
+            serde_json::json!(["claude", "codex"])
+        );
+    }
+
     /// Row 24, "fresh installs only". The FIELD level `#[serde(default)]` on
     /// `refresh_adaptive` is the whole migration: delete it and the container default fills
     /// the missing key from `Config::default()`, which is `true`, and every wave 3 install
@@ -797,5 +871,64 @@ mod tests {
         assert_eq!(cfg.cookie_source("cursor"), "manual");
         assert_eq!(cfg.cookie_browser("cursor"), Some("edge"));
         assert_eq!(cfg.cookie_header("cursor"), Some("a=1"));
+    }
+
+    // ----------------------------------------------------------------------- advisor
+
+    /// The advisor is opt-in: a config written before these keys existed reads them as
+    /// absent and stays silent, and a hand edited file cannot push a value past its
+    /// meaning (a threshold above 100, an hour above 23).
+    #[test]
+    fn the_advisor_defaults_to_off_and_clamps_hand_edited_values() {
+        let cfg = Config::parse(r#"{"refresh_minutes":7}"#);
+        assert_eq!(cfg.alert_below_percent, None);
+        assert_eq!(cfg.alert_quiet_start, None);
+        assert_eq!(cfg.alert_quiet_end, None);
+        assert!(!cfg.quiet_now(), "no ends set is never quiet");
+
+        let cfg = Config::parse(
+            r#"{"alert_below_percent":250,"alert_quiet_start":99,"alert_quiet_end":24}"#,
+        );
+        assert_eq!(cfg.alert_below_percent, Some(100));
+        assert_eq!(cfg.alert_quiet_start, Some(23));
+        assert_eq!(cfg.alert_quiet_end, Some(23));
+
+        // Only one end set is no quiet hours at all, whatever the hour is.
+        let start_only = Config {
+            alert_quiet_start: Some(0),
+            ..Config::default()
+        };
+        assert!(!start_only.quiet_now());
+        let end_only = Config {
+            alert_quiet_end: Some(23),
+            ..Config::default()
+        };
+        assert!(!end_only.quiet_now());
+    }
+
+    /// Quiet hours are `[start, end)`: the end is exclusive, a wrapping window covers
+    /// both sides of midnight, and equal ends are the empty window, not a 24 hour one.
+    #[test]
+    fn quiet_hours_wrap_midnight_and_exclude_the_end() {
+        // A same-day window, 9 until 17.
+        for hour in 9u8..17 {
+            assert!(in_quiet_window(9, 17, hour), "{hour} is inside 9-17");
+        }
+        for hour in [0u8, 8, 17, 23] {
+            assert!(!in_quiet_window(9, 17, hour), "{hour} is outside 9-17");
+        }
+
+        // 22 until 7 wraps midnight.
+        for hour in [22u8, 23, 0, 1, 6] {
+            assert!(in_quiet_window(22, 7, hour), "{hour} is inside 22-7");
+        }
+        for hour in [7u8, 12, 21] {
+            assert!(!in_quiet_window(22, 7, hour), "{hour} is outside 22-7");
+        }
+
+        // Equal ends are the empty window: never quiet.
+        for hour in 0u8..24 {
+            assert!(!in_quiet_window(5, 5, hour));
+        }
     }
 }

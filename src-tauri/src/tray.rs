@@ -16,11 +16,15 @@ use crate::state::{lead_window, AppState, DisplayWindow};
 
 pub const TRAY_ID: &str = "agentsbar-tray";
 
+/// The always-on-top desktop widget window. Created on first use, then reused.
+pub const WIDGET_LABEL: &str = "widget";
+
 const ICON_SIZE: u32 = 32;
 const BAR_TOP: u32 = 27;
 const BAR_INSET: u32 = 2;
 
 static STARTUP_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
+static WIDGET_ITEM: OnceLock<CheckMenuItem<Wry>> = OnceLock::new();
 static FONT: OnceLock<Option<FontVec>> = OnceLock::new();
 /// When the blur handler last hid the popover. Clicking the tray moves focus away
 /// first, so a very recent hide means the click was meant to close the window.
@@ -44,9 +48,14 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let updates = MenuItem::with_id(app, "updates", "Check for updates", true, None::<&str>)?;
+    let widget = CheckMenuItem::with_id(app, "widget", "Show widget", true, false, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&refresh, &settings, &startup, &updates, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&refresh, &settings, &startup, &widget, &updates, &quit],
+    )?;
     let _ = STARTUP_ITEM.set(startup);
+    let _ = WIDGET_ITEM.set(widget);
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(render_icon(&Glyph::blank()))
@@ -83,6 +92,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 });
             }
             "updates" => crate::updater::check_now(app),
+            "widget" => toggle_widget(app),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -126,6 +136,34 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 }
             }
         });
+    }
+
+    // The widget window is created up front by tauri.conf.json (on the main thread), so
+    // showing it is a cheap show/hide and never a window-creation mid-click. It is a
+    // transparent window whose rounded corners come from CSS (works on Win10 and Win11),
+    // so no DWM rounding here. We just remember drags and restore where it last sat.
+    if let Some(window) = app.get_webview_window(WIDGET_LABEL) {
+        let app_for_move = app.clone();
+        window.on_window_event(move |event| {
+            if let tauri::WindowEvent::Moved(_) = event {
+                let should = {
+                    let mut last = LAST_WIDGET_SAVE.lock().unwrap();
+                    match *last {
+                        Some(t) if t.elapsed() < WIDGET_SAVE_EVERY => false,
+                        _ => {
+                            *last = Some(Instant::now());
+                            true
+                        }
+                    }
+                };
+                if should {
+                    if let Some(w) = app_for_move.get_webview_window(WIDGET_LABEL) {
+                        persist_widget_position(&app_for_move, &w);
+                    }
+                }
+            }
+        });
+        restore_widget_position(app);
     }
 
     refresh_taskbar_theme();
@@ -270,7 +308,7 @@ fn show_popover(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    let _ = window.move_window_constrained(Position::TrayBottomRight);
+    let _ = window.move_window_constrained(Position::TrayRight);
     let _ = window.show();
     let _ = window.set_focus();
 
@@ -278,6 +316,98 @@ fn show_popover(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         crate::scheduler::refresh_if_stale(&app).await;
     });
+}
+
+// ---------------------------------------------------------------- desktop widget
+
+/// Throttle for persisting the widget position while it is being dragged: the Moved
+/// event fires continuously, and each persist rewrites the whole config, so at most one
+/// write per drag interval.
+static LAST_WIDGET_SAVE: Mutex<Option<Instant>> = Mutex::new(None);
+const WIDGET_SAVE_EVERY: Duration = Duration::from_millis(500);
+
+/// Toggle the always-on-top widget. The window itself is created up front by
+/// tauri.conf.json, so this is only ever a show/hide — never a window creation, which on
+/// Windows must happen on the main thread and previously deadlocked when invoked from the
+/// popover's IPC command thread. All window work is dispatched to the main thread so both
+/// call sites (tray menu = already main, popover button = IPC worker) are safe. Unlike
+/// the popover, the widget has no blur-hide: it stays put until dismissed.
+pub fn toggle_widget(app: &AppHandle) {
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = app_main.get_webview_window(WIDGET_LABEL) else {
+            return;
+        };
+        if window.is_visible().unwrap_or(false) {
+            // A clean save point: wherever it sits now is where it should reopen.
+            persist_widget_position(&app_main, &window);
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.set_focus();
+            // The widget may have loaded before the first refresh had any numbers, so let
+            // it pull fresh data the moment it becomes visible.
+            let _ = app_main.emit("widget-shown", ());
+        }
+        sync_widget_menu(&app_main);
+    });
+}
+
+/// Restore the widget's saved position (or land it top-right on first use). Reads the
+/// config async, then applies the position on the main thread where window work belongs.
+fn restore_widget_position(app: &AppHandle) {
+    let app_read = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let pos = {
+            let state = app_read.state::<AppState>();
+            let cfg = state.config.read().await;
+            (cfg.widget_x, cfg.widget_y)
+        };
+        let app_main = app_read.clone();
+        let _ = app_read.run_on_main_thread(move || {
+            let Some(window) = app_main.get_webview_window(WIDGET_LABEL) else {
+                return;
+            };
+            match pos {
+                (Some(x), Some(y)) => {
+                    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+                }
+                _ => {
+                    let _ = window.move_window_constrained(Position::TopRight);
+                }
+            }
+        });
+    });
+}
+
+/// Write the widget's current screen position to the config so it reopens there.
+fn persist_widget_position(app: &AppHandle, window: &tauri::WebviewWindow) {
+    let Ok(pos) = window.outer_position() else {
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let mut cfg = state.config.write().await;
+        cfg.widget_x = Some(pos.x);
+        cfg.widget_y = Some(pos.y);
+        if let Err(e) = cfg.save() {
+            log::warn!("config save failed: {e}");
+        }
+    });
+}
+
+/// Keep the tray checkbox honest whenever the widget's visibility changes, whether from
+/// the tray menu itself or from the popover's footer button.
+pub fn sync_widget_menu(app: &AppHandle) {
+    let Some(item) = WIDGET_ITEM.get() else {
+        return;
+    };
+    let visible = app
+        .get_webview_window(WIDGET_LABEL)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    let _ = item.set_checked(visible);
 }
 
 // ---------------------------------------------------------------- icon + tooltip

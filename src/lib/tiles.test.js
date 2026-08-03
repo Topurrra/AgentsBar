@@ -1,6 +1,7 @@
 // Run: node src/lib/tiles.test.js
 import assert from "node:assert/strict";
-import { urgency, sortTiles, oldestFetch, ago, pace, errorCopy, costSummary } from "./tiles.js";
+import { urgency, sortTiles, recommend, multiAccountProviders, outagesSince, oldestFetch, ago, pace, errorCopy, costSummary } from "./tiles.js";
+import * as tileUtils from "./tiles.js";
 
 const t0 = Date.parse("2026-01-01T00:00:00Z");
 const iso = (min) => new Date(t0 + min * 60000).toISOString();
@@ -12,12 +13,61 @@ const win = (label, used, minutes, resets = null) => ({
   resets_at: resets,
 });
 
-// --- row 15: urgency order -------------------------------------------------------
+// --- provider order --------------------------------------------------------------
 
 const prov = (id, configured = true) => ({ id, configured });
 // The backend sends `windows` already clamped by `state::display_windows`; the raw
 // lane fields are deliberately not what the tile reads.
 const snap = (windows, error = null) => ({ windows, error });
+
+// --- widget display --------------------------------------------------------------
+
+// The desktop widget must account for every enabled provider, not only the ones that
+// happen to report percentage windows. These cases are intentionally data-only: the
+// component decides layout, while this helper decides which honest state it receives.
+assert.equal(
+  typeof tileUtils.widgetDisplay,
+  "function",
+  "widget display classification is available to the desktop widget",
+);
+
+{
+  const quota = snap([win("5h", 25, 300)]);
+  assert.deepEqual(
+    tileUtils.widgetDisplay(prov("codex"), quota),
+    { kind: "windows", windows: quota.windows },
+  );
+
+  assert.deepEqual(
+    tileUtils.widgetDisplay(prov("xai"), { windows: [], credits: 14.25, credits_unit: "USD" }),
+    { kind: "credits", value: 14.25, unit: "USD" },
+    "a credit-only provider remains visible",
+  );
+
+  assert.deepEqual(
+    tileUtils.widgetDisplay(prov("openai"), { windows: [], spend_usd: 6.5 }),
+    { kind: "spend", value: 6.5 },
+    "a spend-only provider remains visible",
+  );
+
+  const failed = tileUtils.widgetDisplay(
+    { id: "openrouter", name: "OpenRouter", auth: "api_key", doc_url: "https://openrouter.ai/settings/keys" },
+    { error: "boom", error_kind: "auth" },
+  );
+  assert.equal(failed.kind, "error");
+  assert.match(failed.text, /OpenRouter rejected the saved key/);
+
+  assert.deepEqual(
+    tileUtils.widgetDisplay(prov("new", false), undefined),
+    { kind: "setup" },
+    "an enabled-but-unconfigured provider explains what is missing",
+  );
+  assert.deepEqual(
+    tileUtils.widgetDisplay(prov("fetching"), undefined),
+    { kind: "pending" },
+    "a configured provider without a snapshot is waiting for its first update",
+  );
+}
 
 assert.equal(urgency(prov("a"), snap([win("5h", 100, 300)])), 0, "exhausted");
 assert.equal(urgency(prov("a"), snap([win("5h", 30, 300)])), 70);
@@ -59,10 +109,16 @@ assert.equal(
     ["pinme", snap([win("5h", 2, 300)])],
   ]);
   assert.deepEqual(
-    sortTiles(providers, byId, "pinme").map((p) => p.id),
-    ["pinme", "dead", "low", "healthy", "nodata", "unconfigured", "errored"],
+    sortTiles(providers, byId).map((p) => p.id),
+    ["pinme", "healthy", "low", "dead", "errored", "nodata", "unconfigured"],
+    "a fresh install puts the provider with the most room first",
   );
-  // Stability: same urgency keeps registry order.
+  assert.deepEqual(
+    sortTiles(providers, byId, ["dead", "healthy"]).map((p) => p.id),
+    ["dead", "healthy", "pinme", "low", "errored", "nodata", "unconfigured"],
+    "a saved manual order wins while providers not yet ordered stay automatic",
+  );
+  // Stability: same headroom keeps registry order.
   const tied = [prov("x"), prov("y")];
   const tiedIds = new Map([
     ["x", snap([win("5h", 50, 300)])],
@@ -70,6 +126,19 @@ assert.equal(
   ]);
   assert.deepEqual(sortTiles(tied, tiedIds, null).map((p) => p.id), ["x", "y"]);
 }
+
+// Pointer reordering drops before or after the row under the handle, without mutating
+// the saved order while the gesture is still in progress.
+assert.deepEqual(
+  tileUtils.reorderProviderOrder?.(["claude", "codex", "gemini"], "claude", "codex", true) ?? [],
+  ["codex", "claude", "gemini"],
+  "a lower-half drop moves the provider after its target",
+);
+assert.deepEqual(
+  tileUtils.reorderProviderOrder?.(["claude", "codex", "gemini"], "gemini", "codex", false) ?? [],
+  ["claude", "gemini", "codex"],
+  "an upper-half drop moves the provider before its target",
+);
 
 // --- row 20: freshness -----------------------------------------------------------
 
@@ -258,5 +327,119 @@ assert.deepEqual(costSummary([{ credits: 7, credits_unit: "USD" }]), {
   hasSpend: false,
   hasBalance: true,
 });
+
+// --- recommendation --------------------------------------------------------------
+
+const recMap = (entries) => new Map(entries);
+
+{
+  // Picks the provider with the most headroom on its binding window.
+  const providers = [prov("tight"), prov("roomy"), prov("mid")];
+  const byId = recMap([
+    ["tight", snap([win("5h", 90, 300)])],
+    ["roomy", snap([win("5h", 20, 300)])],
+    ["mid", snap([win("5h", 55, 300)])],
+  ]);
+  const rec = recommend(providers, byId);
+  assert.equal(rec.provider.id, "roomy", "most headroom wins");
+  assert.equal(rec.left, 80);
+}
+
+{
+  // The binding window constrains the recommendation: a fresh 5h above a near-empty
+  // weekly is only as good as the weekly.
+  const providers = [prov("capped"), prov("plain")];
+  const byId = recMap([
+    ["capped", snap([win("5h", 10, 300), win("Weekly", 95, 10080)])],
+    ["plain", snap([win("5h", 60, 300)])],
+  ]);
+  const rec = recommend(providers, byId);
+  assert.equal(rec.provider.id, "plain", "the capped provider only has 5% left");
+  assert.equal(rec.left, 40);
+}
+
+{
+  // Errored, exhausted, unconfigured and data-less providers are never recommended.
+  const providers = [prov("errored"), prov("dead"), prov("unconfigured", false), prov("nodata"), prov("ok")];
+  const byId = recMap([
+    ["errored", snap([win("5h", 10, 300)], "boom")],
+    ["dead", snap([win("5h", 100, 300)])],
+    ["unconfigured", snap([win("5h", 10, 300)])],
+    ["nodata", snap([])],
+    ["ok", snap([win("5h", 50, 300)])],
+  ]);
+  const rec = recommend(providers, byId);
+  assert.equal(rec.provider.id, "ok", "the only usable provider");
+  assert.equal(rec.left, 50);
+}
+
+{
+  // Nobody qualifies → null, so the UI renders nothing rather than a guess.
+  const providers = [prov("dead"), prov("errored")];
+  const byId = recMap([
+    ["dead", snap([win("5h", 100, 300)])],
+    ["errored", snap([win("5h", 10, 300)], "boom")],
+  ]);
+  assert.equal(recommend(providers, byId), null);
+  assert.equal(recommend([], recMap([])), null, "no providers at all");
+}
+
+{
+  // Ties keep registry order (first encountered wins).
+  const providers = [prov("first"), prov("second")];
+  const byId = recMap([
+    ["first", snap([win("5h", 40, 300)])],
+    ["second", snap([win("5h", 40, 300)])],
+  ]);
+  assert.equal(recommend(providers, byId).provider.id, "first");
+}
+
+// --- multi-account detection -----------------------------------------------------
+
+{
+  // A provider with two account series is flagged; a single-account one is not.
+  const multi = multiAccountProviders({
+    "claude:aaa": [{ t: 1, u: 10 }],
+    "claude:bbb": [{ t: 2, u: 20 }],
+    "codex": [{ t: 1, u: 30 }],
+  });
+  assert.ok(multi.has("claude"), "two accounts → flagged");
+  assert.ok(!multi.has("codex"), "one account → not flagged");
+}
+
+{
+  // The bare provider key (no account) counts as one identity, so bare + one account is
+  // already two.
+  const multi = multiAccountProviders({
+    gemini: [{ t: 1, u: 10 }],
+    "gemini:ccc": [{ t: 2, u: 20 }],
+  });
+  assert.ok(multi.has("gemini"));
+}
+
+{
+  // Empty or missing history flags nobody.
+  assert.equal(multiAccountProviders({}).size, 0);
+  assert.equal(multiAccountProviders(null).size, 0);
+}
+
+// --- outage counting --------------------------------------------------------------
+
+{
+  // Counts only !ok points at or after the cutoff; healthy points and older outages are
+  // ignored.
+  const now = 1_000_000;
+  const week = 7 * 86400;
+  const points = [
+    { t: now - 10 * 86400, ok: false }, // too old
+    { t: now - 5 * 86400, ok: false }, // counts
+    { t: now - 4 * 86400, ok: true }, // recovery, not an outage
+    { t: now - 1 * 86400, ok: false }, // counts
+  ];
+  assert.equal(outagesSince(points, now - week), 2);
+  assert.equal(outagesSince(points, now), 0, "nothing after now");
+  assert.equal(outagesSince(null, now - week), 0);
+  assert.equal(outagesSince([], now - week), 0);
+}
 
 console.log("tiles.js ok");

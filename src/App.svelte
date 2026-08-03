@@ -1,7 +1,8 @@
 <script>
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { call, getHistory, hidePopover } from "./lib/api.js";
+  import { call, getHistory, getHealth, hidePopover } from "./lib/api.js";
+  import { applyTheme, systemLight } from "./lib/theme.js";
   import { costSummary } from "./lib/tiles.js";
   import { usd } from "./lib/format.js";
   import Usage from "./lib/Usage.svelte";
@@ -10,6 +11,7 @@
   let providers = $state([]);
   let snapshots = $state([]);
   let history = $state({});
+  let health = $state({});
   let config = $state(null);
   let cadenceSecs = $state(null);
   let view = $state("usage");
@@ -20,7 +22,7 @@
   let sparkWindow = $state("24h");
   // Tile density, "wide" (full tiles) or "compact" (one line each). Same reasoning: a
   // view preference that outlives a Settings round trip.
-  let density = $state("wide");
+  let density = $state("compact");
 
   const enabled = $derived(
     providers.filter((p) => config?.providers?.[p.id]?.enabled),
@@ -70,6 +72,13 @@
     if (h) history = h;
   }
 
+  // Reliability series per provider (down/up transitions). Refreshed alongside history
+  // after every update, so an outage shows up without waiting for the next open.
+  async function loadHealth() {
+    const h = await getHealth();
+    if (h) health = h;
+  }
+
   async function saveConfig(next) {
     config = next;
     await call("set_config", { config: next });
@@ -81,18 +90,6 @@
   // The theme choice ("auto" | "dark" | "light") resolves to a concrete scheme on the
   // <html> data-theme attribute. "auto" follows the OS via matchMedia and re-resolves
   // when the OS changes; the popover is hidden until JS has run, so there is no flash.
-  const systemLight = matchMedia("(prefers-color-scheme: light)");
-  function applyTheme(theme) {
-    const resolved =
-      theme === "light"
-        ? "light"
-        : theme === "dark"
-          ? "dark"
-          : systemLight.matches
-            ? "light"
-            : "dark";
-    document.documentElement.dataset.theme = resolved;
-  }
   $effect(() => applyTheme(config?.theme ?? "auto"));
 
   function cycleTheme() {
@@ -119,6 +116,7 @@
     loadConfig();
     loadSnapshots();
     loadHistory();
+    loadHealth();
 
     // Countdowns tick locally, no backend traffic.
     const tick = setInterval(() => (now = Date.now()), 30000);
@@ -141,6 +139,14 @@
       listen("usage-updated", (e) => {
         if (Array.isArray(e.payload)) snapshots = e.payload;
         loadHistory();
+        loadHealth();
+      }),
+      listen("provider-order-updated", (e) => {
+        if (Array.isArray(e.payload) && config) {
+          config = { ...config, provider_order: e.payload };
+        } else {
+          loadConfig();
+        }
       }),
       listen("open-settings", () => (view = "settings")),
     ];
@@ -200,16 +206,17 @@
       providers={enabled}
       {snapshots}
       {history}
+      {health}
       {config}
       {now}
       {refreshing}
       {staleMs}
-      pinned={config?.pinned_provider ?? null}
       ready={config !== null}
       {sparkWindow}
       onSparkWindow={(w) => (sparkWindow = w)}
       {density}
       onDensity={(d) => (density = d)}
+      onWidget={() => call("toggle_widget")}
       onRefresh={refreshAll}
       onRetry={retry}
       onSettings={() => (view = "settings")}
@@ -224,6 +231,16 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: linear-gradient(
+      160deg,
+      var(--surface-float-raised) 0%,
+      var(--surface-float) 48%,
+      var(--surface-float-raised) 100%
+    );
+    box-shadow: inset 0 1px 0 var(--sheen);
   }
 
   /* The window is undecorated, so this bar is the title bar. It earns that

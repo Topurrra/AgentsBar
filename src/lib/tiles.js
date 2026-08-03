@@ -13,6 +13,24 @@ import { percentLeft, countdown } from "./format.js";
 // unclamped provider numbers, so do not reach for them to draw a bar.
 export const windowsOf = (snap) => snap?.windows ?? [];
 
+// The widget has room for one honest state per enabled provider. It must not quietly
+// disappear a provider just because the provider reports money, an error, or has not
+// completed its first refresh yet.
+export function widgetDisplay(provider, snapshot, cookieSource = null) {
+  const failure = errorCopy(provider, snapshot, cookieSource);
+  if (failure) return { kind: "error", ...failure };
+
+  const windows = windowsOf(snapshot);
+  if (windows.length) return { kind: "windows", windows };
+
+  if (Number.isFinite(snapshot?.credits)) {
+    return { kind: "credits", value: snapshot.credits, unit: snapshot.credits_unit ?? null };
+  }
+  if (Number.isFinite(snapshot?.spend_usd)) return { kind: "spend", value: snapshot.spend_usd };
+
+  return provider?.configured === false ? { kind: "setup" } : { kind: "pending" };
+}
+
 // Row 15. Lower sorts first. Exhausted needs no bucket of its own: 0% left is the
 // smallest percent left there is. An unknown percentage is NOT zero used, so a
 // provider we have no numbers for ranks below every provider we do.
@@ -26,12 +44,96 @@ export function urgency(provider, snapshot, pinned) {
   return lefts.length ? Math.min(...lefts) : 200;
 }
 
-// Array.prototype.sort is stable, so equal urgency keeps registry order.
-export function sortTiles(providers, byId, pinned) {
-  const key = new Map(
-    providers.map((p) => [p.id, urgency(p, byId.get(p.id), pinned)]),
-  );
-  return [...providers].sort((a, b) => key.get(a.id) - key.get(b.id));
+function headroom(provider, snapshot) {
+  if (!provider.configured || snapshot?.error) return null;
+  const lefts = windowsOf(snapshot)
+    .map(percentLeft)
+    .filter((n) => n !== null);
+  return lefts.length ? Math.min(...lefts) : null;
+}
+
+// A saved manual order always wins. Before one exists, show the provider with the
+// most usable room first; providers without a usable percentage stay in registry order.
+export function sortTiles(providers, byId, providerOrder = []) {
+  const manual = new Map();
+  for (const id of providerOrder ?? []) if (!manual.has(id)) manual.set(id, manual.size);
+  const room = new Map(providers.map((p) => [p.id, headroom(p, byId.get(p.id))]));
+
+  return [...providers].sort((a, b) => {
+    const ai = manual.get(a.id);
+    const bi = manual.get(b.id);
+    if (ai !== undefined || bi !== undefined) {
+      if (ai === undefined) return 1;
+      if (bi === undefined) return -1;
+      return ai - bi;
+    }
+    const ar = room.get(a.id);
+    const br = room.get(b.id);
+    if (ar === null || br === null) return ar === null ? (br === null ? 0 : 1) : -1;
+    return br - ar;
+  });
+}
+
+// Move one provider around the row under a reorder handle without mutating the saved
+// order until the widget has completed its pointer gesture.
+export function reorderProviderOrder(order, id, targetId, after = false) {
+  const next = [...(order ?? [])];
+  const sourceIndex = next.indexOf(id);
+  const targetIndex = next.indexOf(targetId);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return next;
+
+  next.splice(sourceIndex, 1);
+  next.splice(next.indexOf(targetId) + (after ? 1 : 0), 0, id);
+  return next;
+}
+
+// The provider to reach for next: the one with the most headroom on its binding window.
+// The mirror image of `urgency`: it sorts the most-constrained first, this picks the
+// least-constrained. A provider you cannot send to is never recommended: unconfigured,
+// errored, exhausted (nothing left to give), or carrying no number at all (you cannot
+// recommend what you cannot measure). Ties keep registry order. Returns null when nobody
+// qualifies, so the caller renders nothing rather than a guess.
+export function recommend(providers, byId) {
+  let best = null;
+  let bestLeft = -1;
+  for (const p of providers) {
+    if (!p.configured) continue;
+    const snap = byId.get(p.id);
+    if (!snap || snap.error) continue;
+    const lefts = windowsOf(snap)
+      .map(percentLeft)
+      .filter((n) => n !== null);
+    if (!lefts.length) continue;
+    const left = Math.min(...lefts); // the binding window is the one that constrains you
+    if (left <= 0) continue;
+    if (left > bestLeft) {
+      bestLeft = left;
+      best = p;
+    }
+  }
+  return best ? { provider: best, left: bestLeft } : null;
+}
+
+// The set of provider ids that have more than one account in the history. Each series key
+// is one account (row 35), and a provider id is everything before the first colon (ids
+// never contain one). The tile names the active account only for these providers; for a
+// single-account provider that would be noise.
+export function multiAccountProviders(history) {
+  const counts = new Map();
+  for (const key of Object.keys(history ?? {})) {
+    const pid = key.split(":")[0];
+    counts.set(pid, (counts.get(pid) ?? 0) + 1);
+  }
+  const set = new Set();
+  for (const [pid, n] of counts) if (n >= 2) set.add(pid);
+  return set;
+}
+
+// Count outages at or after `since`. Each point in a health series is a STATUS CHANGE
+// (see health.rs), so a `!ok` point marks the start of exactly one outage however long
+// that outage lasted; counting them counts outages, not failed refreshes.
+export function outagesSince(points, since) {
+  return (points ?? []).filter((p) => p && p.ok === false && p.t >= since).length;
 }
 
 // Row 20. The footer stamp is the OLDEST fetch across the tiles on screen, not the

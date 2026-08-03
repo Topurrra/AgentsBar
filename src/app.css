@@ -63,6 +63,10 @@
   --surface-raised: #17171a; /* provider tiles, settings cards */
   --surface-raised-hover: #1c1c21;
   --surface-sunken: #0c0c0e; /* inputs, wells */
+  /* Widget-only translucent layers. They reuse the same neutral family instead of
+     introducing a second palette, so the transparent native window remains legible. */
+  --surface-float: rgba(15, 15, 17, 0.93);
+  --surface-float-raised: rgba(23, 23, 26, 0.88);
   --surface-track: #212127; /* unfilled part of a progress bar */
   --surface-hatch: #3a3a42; /* stripe colour for an unknown quantity */
   --surface-toggle: #2a2a30; /* toggle switch track, off state */
@@ -173,6 +177,8 @@
   --surface-raised: #ffffff;
   --surface-raised-hover: #f4f4f8;
   --surface-sunken: #d8d8df;
+  --surface-float: rgba(227, 227, 233, 0.93);
+  --surface-float-raised: rgba(255, 255, 255, 0.88);
   --surface-track: #cdccd5;
   --surface-hatch: #aaaab4;
   --surface-toggle: #bcbcc6;
@@ -235,6 +241,13 @@ body {
      Tabular figures app-wide means none of them reflow as they change, and
      no component has to remember to ask. */
   font-variant-numeric: tabular-nums;
+}
+
+:root[data-window="main"],
+:root[data-window="main"] body,
+:root[data-window="widget"],
+:root[data-window="widget"] body {
+  background: transparent;
 }
 
 #app {

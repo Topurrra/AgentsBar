@@ -18,6 +18,7 @@
   let query = $state("");
   let testing = $state(new Set());
   let testResult = $state({});
+  let expandedProvider = $state(null);
 
   const needsKey = (p) => p.auth === "api_key" || p.auth === "token";
 
@@ -98,6 +99,38 @@
     patch((c) => (c.notify_on_exhaustion = on));
   }
 
+  // Advisor. "" is off (null); otherwise the remaining percentage that fires a toast the
+  // first time a provider's lead window drops to or below it.
+  function setAlertBelow(e) {
+    const v = e.currentTarget.value;
+    patch((c) => (c.alert_below_percent = v === "" ? null : Number(v)));
+  }
+
+  // Quiet hours exist only while BOTH ends are set: the toggle writes defaults on (22 to
+  // 7, the classic sleep window) and nulls out on, and the backend reads "either end
+  // missing" as no quiet hours.
+  const quietOn = $derived(config?.alert_quiet_start != null && config?.alert_quiet_end != null);
+  const hourOptions = Array.from({ length: 24 }, (_, h) => h);
+  const hourLabel = (h) => `${String(h).padStart(2, "0")}:00`;
+
+  function setQuiet(e) {
+    const on = e.currentTarget.checked;
+    patch((c) => {
+      c.alert_quiet_start = on ? (c.alert_quiet_start ?? 22) : null;
+      c.alert_quiet_end = on ? (c.alert_quiet_end ?? 7) : null;
+    });
+  }
+
+  function setQuietStart(e) {
+    const h = Number(e.currentTarget.value);
+    patch((c) => (c.alert_quiet_start = h));
+  }
+
+  function setQuietEnd(e) {
+    const h = Number(e.currentTarget.value);
+    patch((c) => (c.alert_quiet_end = h));
+  }
+
   function setPinned(e) {
     const v = e.currentTarget.value;
     patch((c) => (c.pinned_provider = v === "" ? null : v));
@@ -116,11 +149,17 @@
       c.providers ??= {};
       c.providers[id] = { ...(c.providers[id] ?? { api_key: null }), enabled: on };
     });
+    if (!on && expandedProvider === id) expandedProvider = null;
+  }
+
+  function toggleProvider(id) {
+    expandedProvider = expandedProvider === id ? null : id;
   }
 
   // Cookie providers go through set_cookie_source, which also owns their enabled flag,
   // so they get a source select instead of a toggle.
   async function saveSource(id, source, browser) {
+    if (source === "off" && expandedProvider === id) expandedProvider = null;
     await setCookieSource(id, source, browser ?? null);
     onKeySaved();
   }
@@ -240,9 +279,12 @@
 </script>
 
 <div class="scroll">
-  <div class="secthead">
-    <h2>General</h2>
-  </div>
+  <details class="settings-section" open>
+    <summary class="secthead">
+      <span class="section-title">General</span>
+      <span class="gap"></span>
+      <span class="section-chevron" aria-hidden="true"></span>
+    </summary>
 
   <section>
     <div class="field">
@@ -311,6 +353,74 @@
 
     <div class="field">
       <div class="row">
+        <label for="alertbelow">Alert when a provider drops below</label>
+        <span class="gap"></span>
+        <span class="sel">
+          <select
+            id="alertbelow"
+            value={String(config?.alert_below_percent ?? "")}
+            onchange={setAlertBelow}
+          >
+            <option value="">Off</option>
+            <option value="50">50% remaining</option>
+            <option value="30">30% remaining</option>
+            <option value="20">20% remaining</option>
+            <option value="10">10% remaining</option>
+          </select>
+        </span>
+      </div>
+      {#if config?.alert_below_percent != null}
+        <p class="note">
+          Notifies once when remaining quota first falls to or below this level, and
+          again only after it recovers above it.
+        </p>
+      {/if}
+    </div>
+
+    <div class="field">
+      <div class="row">
+        <label for="quiet">Quiet hours</label>
+        <span class="gap"></span>
+        {#if quietOn}
+          <span class="sel hours">
+            <select
+              aria-label="Quiet hours start"
+              value={String(config?.alert_quiet_start ?? 22)}
+              onchange={setQuietStart}
+            >
+              {#each hourOptions as h}
+                <option value={h}>{hourLabel(h)}</option>
+              {/each}
+            </select>
+          </span>
+          <span class="unit wide">to</span>
+          <span class="sel hours">
+            <select
+              aria-label="Quiet hours end"
+              value={String(config?.alert_quiet_end ?? 7)}
+              onchange={setQuietEnd}
+            >
+              {#each hourOptions as h}
+                <option value={h}>{hourLabel(h)}</option>
+              {/each}
+            </select>
+          </span>
+        {/if}
+        <span class="switch">
+          <input id="quiet" type="checkbox" checked={quietOn} onchange={setQuiet} />
+          <span></span>
+        </span>
+      </div>
+      {#if quietOn}
+        <p class="note">
+          Alerts stay silent between these local hours. A start after the end wraps
+          midnight, so 22:00 to 07:00 means overnight.
+        </p>
+      {/if}
+    </div>
+
+    <div class="field">
+      <div class="row">
         <label for="pinned">Tray provider</label>
         <span class="gap"></span>
         <span class="sel">
@@ -343,10 +453,14 @@
       </p>
     </div>
   </section>
+  </details>
 
-  <div class="secthead">
-    <h2>Support</h2>
-  </div>
+  <details class="settings-section">
+    <summary class="secthead">
+      <span class="section-title">Support</span>
+      <span class="gap"></span>
+      <span class="section-chevron" aria-hidden="true"></span>
+    </summary>
 
   <section>
     <div class="field">
@@ -398,12 +512,18 @@
       {/if}
     </div>
   </section>
+  </details>
 
-  <div class="secthead">
-    <h2>Providers</h2>
-    <span class="chip count">{onCount} on</span>
-    <span class="gap"></span>
-    <span class="searchwrap">
+  <details class="settings-section">
+    <summary class="secthead">
+      <span class="section-title">Providers</span>
+      <span class="chip count">{onCount} on</span>
+      <span class="gap"></span>
+      <span class="section-chevron" aria-hidden="true"></span>
+    </summary>
+
+    <div class="provider-tools">
+      <span class="searchwrap">
       <svg
         class="searchico"
         width="11"
@@ -426,8 +546,8 @@
         spellcheck="false"
         bind:value={query}
       />
-    </span>
-  </div>
+      </span>
+    </div>
 
   {#if !providers.length}
     <p class="hint">No providers registered.</p>
@@ -441,14 +561,24 @@
     {@const manual = MANUAL_ONLY[p.id]}
     {@const stored = sourceOf(e)}
     {@const src = manual && stored !== "off" ? "manual" : stored}
+    {@const configurable = (cookie && src !== "off") || needsKey(p)}
     <div
       class="prov"
       class:on={e.enabled}
+      class:open={configurable && expandedProvider === p.id}
       style="--accent-soft: {providerAccent(p.id)}40"
     >
       <div class="row">
         <span class="ico"><ProviderIcon id={p.id} size={15} /></span>
-        <span class="name">{p.name}</span>
+        <button
+          class="name"
+          title={p.doc_url ? "Open " + p.name + " documentation" : undefined}
+          aria-label={p.doc_url ? "Open " + p.name + " documentation" : p.name}
+          onclick={() => openUrl(p.doc_url)}
+          disabled={!p.doc_url}
+        >
+          {p.name}
+        </button>
         {#if cookie}
           <span class="chip kind">session</span>
         {/if}
@@ -456,8 +586,15 @@
           <span class="chip tag">needs auth</span>
         {/if}
         <span class="gap"></span>
-        {#if p.doc_url}
-          <button class="btn docs" onclick={() => openUrl(p.doc_url)}>Docs</button>
+        {#if configurable}
+          <button
+            class="btn docs"
+            aria-expanded={expandedProvider === p.id}
+            aria-controls={"provider-config-" + p.id}
+            onclick={() => toggleProvider(p.id)}
+          >
+            {expandedProvider === p.id ? "Close" : "Configure"}
+          </button>
         {/if}
         {#if e.enabled && p.configured}
           {@const isTesting = testing.has(p.id)}
@@ -498,8 +635,8 @@
         {/if}
       </div>
 
-      {#if cookie && src === "auto"}
-        <div class="sub">
+      {#if expandedProvider === p.id && cookie && src === "auto"}
+        <div class="sub" id={"provider-config-" + p.id}>
           <div class="row">
             <label for={"br-" + p.id} class="sublabel">Browser</label>
             <span class="gap"></span>
@@ -525,8 +662,8 @@
             <p class="note">{browserNote(e.cookie_browser)}</p>
           {/if}
         </div>
-      {:else if cookie && src === "manual"}
-        <div class="sub">
+      {:else if expandedProvider === p.id && cookie && src === "manual"}
+        <div class="sub" id={"provider-config-" + p.id}>
           <span class="secret" class:saved={p.configured}>
             <svg
               class="lockico"
@@ -544,6 +681,7 @@
             <textarea
               class="key"
               rows="2"
+              aria-label={"Session for " + p.name}
               placeholder={p.configured
                 ? "Saved, paste to replace"
                 : (manual?.placeholder ?? "name=value; name2=value2")}
@@ -558,8 +696,8 @@
               "Paste the Cookie header from your signed in browser. Stored like an API key and never shown again."}
           </p>
         </div>
-      {:else if needsKey(p)}
-        <span class="secret" class:saved={p.configured}>
+      {:else if expandedProvider === p.id && needsKey(p)}
+        <span class="secret" id={"provider-config-" + p.id} class:saved={p.configured}>
           <svg
             class="lockico"
             width="11"
@@ -576,6 +714,7 @@
           <input
             type="password"
             class="key"
+            aria-label={(p.auth === "token" ? "Token for " : "API key for ") + p.name}
             placeholder={p.configured
               ? "Saved, type to replace"
               : p.auth === "token"
@@ -591,6 +730,7 @@
       {/if}
     </div>
   {/each}
+  </details>
 </div>
 
 <style>
@@ -603,19 +743,38 @@
   /* --- Section rhythm -----------------------------------------------------
      A heading sits outside its card, so the eye gets label, group, label,
      group instead of one undifferentiated scroll of boxes. */
+  .settings-section {
+    margin-top: var(--sp-5);
+  }
+
+  .settings-section:first-child {
+    margin-top: var(--sp-2);
+  }
+
   .secthead {
     display: flex;
     align-items: center;
     gap: var(--sp-3);
-    margin: var(--sp-6) 0 var(--sp-3);
+    margin: 0 calc(-1 * var(--sp-2)) var(--sp-3);
+    padding: var(--sp-2);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    list-style: none;
   }
 
-  .secthead:first-child {
-    margin-top: var(--sp-4);
+  .secthead::-webkit-details-marker {
+    display: none;
   }
 
-  h2 {
-    margin: 0;
+  .secthead::marker {
+    content: "";
+  }
+
+  .secthead:hover {
+    background: var(--overlay-hover);
+  }
+
+  .section-title {
     font-size: var(--type-meta);
     font-weight: var(--weight-medium);
     text-transform: uppercase;
@@ -623,8 +782,28 @@
     color: var(--text-secondary);
   }
 
+  .section-chevron {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid var(--text-muted);
+    border-bottom: 1.5px solid var(--text-muted);
+    transform: rotate(45deg);
+    transition: transform var(--motion-fast) var(--ease);
+  }
+
+  .settings-section[open] .section-chevron {
+    transform: rotate(225deg);
+  }
+
   .count {
     color: var(--text-muted);
+  }
+
+  .provider-tools {
+    display: flex;
+    justify-content: flex-end;
+    margin: 0 0 var(--sp-3);
   }
 
   /* --- Grouped card -------------------------------------------------------
@@ -725,6 +904,16 @@
     max-width: 96px;
   }
 
+  /* Quiet hour selects hold "22:00" and nothing longer. */
+  .hours select {
+    max-width: 78px;
+  }
+
+  /* The "to" between the two hour selects does not fit the 18px the "min" unit gets. */
+  .unit.wide {
+    width: auto;
+  }
+
   .src select {
     padding: var(--sp-1) 20px var(--sp-1) var(--sp-3);
   }
@@ -760,17 +949,23 @@
      an off one is an outline with a desaturated mark. Nothing animates. */
   .prov {
     border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-md);
     background: transparent;
     padding: 0 var(--sp-5) var(--sp-3);
     margin-bottom: var(--sp-3);
     overflow: hidden;
-    transition: border-color var(--motion-fast) var(--ease);
+    transition:
+      background var(--motion-fast) var(--ease),
+      border-color var(--motion-fast) var(--ease);
   }
 
   .prov.on {
-    background: var(--surface-raised);
     box-shadow: inset 2px 0 0 var(--accent-soft);
+  }
+
+  .prov.open {
+    background: linear-gradient(135deg, var(--overlay-hover), var(--surface-raised));
+    border-color: var(--border-strong);
   }
 
   .prov:hover {
@@ -780,6 +975,7 @@
   .prov .row {
     min-height: 34px;
     gap: var(--sp-3);
+    min-width: 0;
   }
 
   .ico {
@@ -795,6 +991,9 @@
   }
 
   .name {
+    min-width: 0;
+    flex: 1 1 auto;
+    text-align: left;
     color: var(--text-secondary);
     font-weight: var(--weight-regular);
     white-space: nowrap;
@@ -805,6 +1004,14 @@
   .prov.on .name {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
+  }
+
+  .name:not(:disabled):hover {
+    color: var(--text-primary);
+  }
+
+  .name:disabled {
+    cursor: default;
   }
 
   /* Cookie providers get an indented block instead of a bare field, so the browser
